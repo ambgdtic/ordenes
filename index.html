@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<!--
+  Sistema: ERP Alcaldía de Guanipa · Módulo de Órdenes (Pago, Compra y Servicio)
+  Versión: 1.0.0-beta
+  © 2026 Soluciones AFFINITY. Todos los derechos reservados.
+-->
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>ERP Guanipa · Órdenes</title>
+  <link rel="icon" href="assets/logo.jpg">
+  <script>
+    (function () {
+      try {
+        var t = localStorage.getItem('tema');
+        if (t === 'oscuro' || (!t && window.matchMedia('(prefers-color-scheme: dark)').matches)) document.documentElement.classList.add('dark');
+      } catch (e) {}
+    })();
+  </script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>if (window.tailwind) tailwind.config = { darkMode: 'class' };</script>
+  <script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.6/dist/chart.umd.min.js" defer></script>
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <link rel="stylesheet" href="estilos.css">
+</head>
+<body class="min-h-screen">
+  <a href="#contenido" class="saltar">Saltar al contenido</a>
+  <div id="aviso-red" class="aviso-red" role="status" aria-live="polite" hidden></div>
+  <div id="app" aria-live="polite">
+    <div class="flex items-center justify-center min-h-screen text-sm" style="color:var(--suave)">Cargando…</div>
+  </div>
+  <div id="toasts" class="toasts" aria-live="assertive"></div>
+  <noscript>Este sistema necesita JavaScript activado.</noscript>
+
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+  <script src="modulos/panel.js"></script>
+  <script src="modulos/pagos.js"></script>
+  <script src="modulos/importar.js"></script>
+  <script src="modulos/ordenes.js"></script>
+  <script src="modulos/beneficiarios.js"></script>
+  <script src="modulos/tasas.js"></script>
+  <script src="modulos/admin.js"></script>
+  <script>document.addEventListener('DOMContentLoaded', function () { App.iniciar(); });</script>
+</body>
+</html>

@@ -27,7 +27,7 @@ function autorizarCorreo() {
 
 const APP = {
   nombre: 'ERP Guanipa · Órdenes',
-  version: '1.0.10-beta',
+  version: '1.0.11-beta',
   zona: 'America/Caracas',
   nombreLibro: 'ERP Guanipa - Base de Datos',
   nombreCarpetaRaiz: 'ERP Guanipa - Documentos'
@@ -2442,7 +2442,9 @@ function detectarColumnasConciliacion(filas) {
     let monto = norm.findIndex((c) => /DEBITO|CARGO|EGRESO|RETIRO/.test(c));
     if (monto === -1) monto = norm.findIndex((c) => /^MONTO|^IMPORTE/.test(c));
     const ref = norm.findIndex((c) => /REFERENCIA|^REF\.?$/.test(c));
-    if (fecha > -1 && desc > -1 && monto > -1) return { inicio: i + 1, fecha, desc, monto, ref };
+    // Columna con el N° de Orden de Pago ya asignado por Tesorería ("Nº", "N°", "Nro", "N° OP", "Orden").
+    const numero = norm.findIndex((c) => /^(N|NO|NRO|NUM|NUMERO)\W*$|^N\W*\s*(DE\s*)?(OP|ORDEN)\b|^(NRO|NUMERO)\W*\s*(DE\s*)?(OP|ORDEN)|^ORDEN/.test(c));
+    if (fecha > -1 && desc > -1 && monto > -1) return { inicio: i + 1, fecha, desc, monto, ref, numero };
   }
   for (let i = 0; i < limite; i++) {
     const fila = filas[i] || [];
@@ -2450,7 +2452,7 @@ function detectarColumnasConciliacion(filas) {
     const desc = fila.findIndex((c, k) => k > fecha && typeof c === 'string' && /[A-Za-z]{3}/.test(c) && c.length > 8);
     let monto = -1;
     for (let k = fila.length - 1; k > desc; k--) { if (aNumero(fila[k]) > 0) { monto = k; break; } }
-    if (fecha > -1 && desc > -1 && monto > -1) return { inicio: i, fecha, desc, monto, ref: -1 };
+    if (fecha > -1 && desc > -1 && monto > -1) return { inicio: i, fecha, desc, monto, ref: -1, numero: -1 };
   }
   return null;
 }
@@ -2477,11 +2479,17 @@ function interpretarDescripcionBancaria(descripcion) {
   let m = d.match(/OTROS BANCOS\s+(\d{4})\s+([A-Z])?[- ]?(\d{5,10})\b/);
   if (m) return { tipo_mov: 'PROVEEDOR', banco_codigo: m[1], tipo_doc: normalizarTipoDoc(m[2]), documento: completarRif(m[2], m[3]), lote: '' };
   m = d.match(/\bBDV\s+([A-Z])?[- ]?(\d{5,10})\b(?:.*?\bLOTE\s*(\d+))?/);
-  if (m) return { tipo_mov: 'PROVEEDOR', banco_codigo: '0102', tipo_doc: normalizarTipoDoc(m[1]), documento: documentoBdv(m[1], m[2]), lote: m[3] || '' };
+  // Lo que va entre "BDV" y "LOTE" es siempre el documento. Sin letra, el BDV envía una cédula venezolana.
+  if (m) return { tipo_mov: 'PROVEEDOR', banco_codigo: '0102', tipo_doc: normalizarTipoDoc(m[1]) || 'V', documento: documentoBdv(m[1] || 'V', m[2]), lote: m[3] || '' };
   if (/NOMINA/.test(d)) return Object.assign({}, vacio, { tipo_mov: 'NOMINA' });
   m = d.match(/\b([VEJGP])[- ]?(\d{6,10})\b/);
   if (m) return { tipo_mov: 'PROVEEDOR', banco_codigo: '', tipo_doc: m[1], documento: completarRif(m[1], m[2]), lote: '' };
   return vacio;
+}
+
+function numeroOpValido(v) {
+  const n = Number(String(v === undefined || v === null ? '' : v).replace(/[^\d]/g, ''));
+  return Number.isInteger(n) && n > 0 && n < 1e7 ? n : null;
 }
 
 function claveMovimiento(fecha, descripcion, monto, ocurrencia) {
@@ -2505,6 +2513,7 @@ function extraerMovimientos(filas) {
     movimientos.push({
       fila: i + 1, fecha, descripcion, monto,
       referencia: cols.ref > -1 ? String(fila[cols.ref] || '') : '',
+      numero_op: cols.numero > -1 ? numeroOpValido(fila[cols.numero]) : null,
       ocurrencia: vistos[base]
     });
   }
@@ -2518,6 +2527,10 @@ function enriquecerMovimiento(mov, contexto) {
     clave, estado: 'NUEVO', observaciones: [], beneficiario: '', beneficiario_id: '', cuenta: '',
     categoria: '', descripcion_pago: '', sugerencias: []
   });
+  if (mov.numero_op && contexto.numeros[mov.numero_op] && !contexto.claves[clave]) {
+    r.observaciones.push(`El N° de OP ${mov.numero_op} ya está usado por otro pago: se asignará uno nuevo`);
+    r.numero_op = null;
+  }
   if (contexto.claves[clave]) {
     r.estado = 'DUPLICADO';
     r.observaciones.push(`Ya importado como pago N° ${contexto.claves[clave]}`);
@@ -2567,15 +2580,17 @@ function enriquecerMovimiento(mov, contexto) {
 
 function contextoImportacion() {
   const claves = {};
+  const numeros = {};
   const porFechaMonto = {};
   db.leer('Pagos').forEach((p) => {
     if (p.clave_conciliacion) claves[p.clave_conciliacion] = p.numero;
+    numeros[p.numero] = true;
     if (p.estado === ESTADO_ANULADA) return;
     const k = `${p.fecha}|${Number(p.monto).toFixed(2)}`;
     (porFechaMonto[k] = porFechaMonto[k] || []).push({ numero: p.numero, tipo_doc: p.tipo_doc, documento: p.documento });
   });
   return {
-    claves, porFechaMonto, nombreNomina: config.obtener('beneficiario_nomina') || 'PAGO DE NÓMINA',
+    claves, numeros, porFechaMonto, nombreNomina: config.obtener('beneficiario_nomina') || 'PAGO DE NÓMINA',
     beneficiarios: db.leer('Beneficiarios').filter((b) => b.activo !== false)
   };
 }
@@ -2635,7 +2650,10 @@ function conciliacionAnalizar(datos) {
       monto_nuevos: redondear2(nuevos.reduce((s, m) => s + m.monto, 0)),
       desde: fechas[0] || null,
       hasta: fechas[fechas.length - 1] || null,
-      proximo_numero: (config.obtener('correlativos') || {}).op || 1
+      proximo_numero: (config.obtener('correlativos') || {}).op || 1,
+      con_numero_archivo: nuevos.filter((m) => m.numero_op).length,
+      numero_desde: nuevos.some((m) => m.numero_op) ? Math.min.apply(null, nuevos.filter((m) => m.numero_op).map((m) => m.numero_op)) : null,
+      numero_hasta: nuevos.some((m) => m.numero_op) ? Math.max.apply(null, nuevos.filter((m) => m.numero_op).map((m) => m.numero_op)) : null
     }
   };
 }
@@ -2656,7 +2674,11 @@ function conciliacionConfirmar(datos, usuario) {
       const descripcion = textoSeguro(m.descripcion, 300);
       const ocurrencia = Math.max(1, Number(m.ocurrencia) || 1);
       if (!fecha || !(monto > 0) || !descripcion) { omitidos.push({ fila: m.fila, motivo: 'Datos incompletos' }); return; }
-      const mov = enriquecerMovimiento({ fila: m.fila, fecha, descripcion, monto, referencia: textoSeguro(m.referencia, 60), ocurrencia }, contexto);
+      const mov = enriquecerMovimiento({ fila: m.fila, fecha, descripcion, monto, referencia: textoSeguro(m.referencia, 60), ocurrencia, numero_op: numeroOpValido(m.numero_op) }, contexto);
+      if (mov.numero_op) {
+        if (contexto.numeros[mov.numero_op]) mov.numero_op = null;
+        else contexto.numeros[mov.numero_op] = true;
+      }
       if (mov.estado === 'DUPLICADO') { omitidos.push({ fila: m.fila, motivo: 'Ya importado' }); return; }
       contexto.claves[mov.clave] = 'en proceso';
       if (m.categoria && categorias.indexOf(m.categoria) > -1) mov.categoria = m.categoria;
@@ -2678,11 +2700,19 @@ function conciliacionConfirmar(datos, usuario) {
     if (!validos.length) return { importados: 0, omitidos, pagos: [] };
 
     validos.sort((a, b) => (a.fecha === b.fecha ? a.fila - b.fila : (a.fecha < b.fecha ? -1 : 1)));
-    const inicio = config.reservarCorrelativo('op', validos.length, usuario.email);
+    // Los que traen N° de OP del archivo lo conservan; el resto toma el correlativo, saltando números ya usados.
+    const sinNumero = validos.filter((m) => !m.numero_op).length;
+    const maximoArchivo = Math.max.apply(null, validos.map((m) => m.numero_op || 0).concat([0]));
+    const actual = Number((config.obtener('correlativos') || {}).op) || 1;
+    if (maximoArchivo + 1 > actual) config.guardar('correlativos', Object.assign({ op: 1, oc: 1, os: 1 }, config.obtener('correlativos'), { op: maximoArchivo + 1 }), usuario.email);
+    let siguiente = sinNumero ? config.reservarCorrelativo('op', sinNumero, usuario.email) : null;
+    const inicio = siguiente;
     const importacionId = uuid();
-    const pagos = validos.map((m, i) => {
+    const pagos = validos.map((m) => {
+      let numero = m.numero_op;
+      if (!numero) { while (contexto.numeros[siguiente]) siguiente++; numero = siguiente++; contexto.numeros[numero] = true; }
       const p = {
-        numero: inicio + i, fecha: m.fecha, beneficiario_id: m.beneficiario_id, beneficiario: m.beneficiario,
+        numero, fecha: m.fecha, beneficiario_id: m.beneficiario_id, beneficiario: m.beneficiario,
         tipo_doc: m.tipo_doc, documento: m.documento, monto: m.monto, categoria: m.categoria,
         descripcion: m.descripcion_pago, cuenta: m.cuenta, banco_codigo: m.cuenta ? codigoBanco(m.cuenta) : m.banco_codigo,
         tasa_bcv: m.tasa_bcv, monto_usd: m.monto_usd, estado: ESTADO_ACTIVA, origen: 'CONCILIACION',
@@ -2710,7 +2740,9 @@ function conciliacionConfirmar(datos, usuario) {
       rango_desde: fechas[0], rango_hasta: fechas[fechas.length - 1]
     }, usuario.email);
     const resumen = {
-      importados: insertados.length, omitidos, desde_numero: inicio, hasta_numero: inicio + insertados.length - 1,
+      importados: insertados.length, omitidos,
+      desde_numero: Math.min.apply(null, pagos.map((p) => p.numero)), hasta_numero: Math.max.apply(null, pagos.map((p) => p.numero)),
+      correlativo_asignado_desde: inicio,
       por_completar: insertados.filter((p) => p.estado_datos === 'POR_COMPLETAR').length,
       monto_total: redondear2(pagos.reduce((s, p) => s + p.monto, 0))
     };

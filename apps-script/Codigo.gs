@@ -8,7 +8,7 @@
 
 const APP = {
   nombre: 'ERP Guanipa · Órdenes',
-  version: '1.0.2-beta',
+  version: '1.0.3-beta',
   zona: 'America/Caracas',
   nombreLibro: 'ERP Guanipa - Base de Datos',
   nombreCarpetaRaiz: 'ERP Guanipa - Documentos'
@@ -933,6 +933,7 @@ function doPost(e) {
 function ejecutarAccion(accion, datos, token, idSolicitud) {
   const ruta = rutasApi()[accion];
   if (!ruta) throw new ErrorApp(`Acción no reconocida: ${accion}`, 'ACCION');
+  instalarSiFalta(token);
   const usuario = autenticar(token);
   exigirPermiso(usuario, ruta.permiso);
 
@@ -946,6 +947,23 @@ function ejecutarAccion(accion, datos, token, idSolicitud) {
     if (texto.length < 90000) CacheService.getScriptCache().put('req_' + idSolicitud, texto, 21600);
   }
   return resultado === undefined ? null : resultado;
+}
+
+/** Primera entrada: si la base de datos no existe y quien entra es el dueño del script, se instala sola. */
+function instalarSiFalta(token) {
+  if (PropertiesService.getScriptProperties().getProperty('DB_ID')) return;
+  const email = verificarTokenGoogle(token);
+  const dueno = String(Session.getEffectiveUser().getEmail() || '').toLowerCase();
+  if (!dueno || email !== dueno) {
+    throw new ErrorApp('El sistema aún no está instalado. La cuenta dueña debe entrar primero.', 'NO_INSTALADO');
+  }
+  const bloqueo = LockService.getScriptLock();
+  if (!bloqueo.tryLock(60000)) throw new ErrorApp('La instalación está en curso. Espere un minuto y recargue.', 'OCUPADO');
+  try {
+    if (!PropertiesService.getScriptProperties().getProperty('DB_ID')) instalar();
+  } finally {
+    bloqueo.releaseLock();
+  }
 }
 
 function respuestaError(error, accion) {

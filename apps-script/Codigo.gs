@@ -8,7 +8,7 @@
 
 const APP = {
   nombre: 'ERP Guanipa · Órdenes',
-  version: '1.0.6-beta',
+  version: '1.0.7-beta',
   zona: 'America/Caracas',
   nombreLibro: 'ERP Guanipa - Base de Datos',
   nombreCarpetaRaiz: 'ERP Guanipa - Documentos'
@@ -147,8 +147,19 @@ const CONFIG_BASE = {
   tolerancia_diferencia: {
     descripcion: 'Diferencia máxima (Bs.) aceptada entre lo pagado y el neto calculado de la OP',
     valor: 1
+  },
+  umbral_fondo_negro: {
+    descripcion: 'Total de factura (Bs.) a partir del cual se aplica automáticamente el Fondo Negro Primero',
+    valor: 100000
   }
 };
+
+/** Categorías que por defecto no llevan factura (pagos a particulares, transferencias entre entes). */
+const CATEGORIAS_SIN_FACTURA = ['Ayudas Económicas', 'Dozavos', 'Créditos Adicionales', 'Subvenciones', CATEGORIA_NOMINA, 'Correcciones Puntuales'];
+
+/** Orden de las retenciones en el formulario: las más usadas primero. La impresión respeta la plantilla. */
+const ORDEN_RETENCIONES_FORMULARIO = ['IVA', 'ISLR', 'TIMBRE', 'MUNICIPAL'];
+const CODIGO_FONDO_NEGRO = 'FONDO_NEGRO';
 
 /** Valor inicial de un parámetro: base del código, sustituido por 99_DatosLocales.gs si existe. */
 function valorConfigInicial(clave) {
@@ -283,6 +294,11 @@ function formatoNumeroVE(n, decimales) {
   return (negativo ? '-' : '') + conMiles + (fraccion ? ',' + fraccion : '');
 }
 
+/** Formato para mensajes: 1.250,50 Bs. */
+function formatoBs(n) {
+  return formatoNumeroVE(n, 2) + ' Bs.';
+}
+
 /** Formato de las plantillas impresas: Bs10.263.128,30 */
 function formatoBsPlantilla(n) {
   if (n === null || n === undefined || n === '') return '';
@@ -323,6 +339,41 @@ function esRif(tipo) {
   return ['J', 'G', 'C'].indexOf(normalizarTipoDoc(tipo)) > -1;
 }
 
+/** Valor de la letra para el dígito verificador del RIF (SENIAT). C no tiene valor conocido: no se calcula. */
+const VALOR_LETRA_RIF = { V: 1, E: 2, J: 3, P: 4, G: 5 };
+const PESOS_RIF = [3, 2, 7, 6, 5, 4, 3, 2];
+
+/** Dígito verificador del RIF a partir de la letra y los 8 dígitos (módulo 11). Null si no aplica. */
+function digitoVerificadorRif(tipo, cuerpo) {
+  const t = normalizarTipoDoc(tipo);
+  const d = soloDigitos(cuerpo);
+  if (!VALOR_LETRA_RIF[t] || !d || d.length > 8) return null;
+  const ocho = ('00000000' + d).slice(-8);
+  const suma = VALOR_LETRA_RIF[t] * 4 + PESOS_RIF.reduce((s, peso, i) => s + Number(ocho.charAt(i)) * peso, 0);
+  const resto = 11 - (suma % 11);
+  return resto >= 10 ? 0 : resto;
+}
+
+/** Cuerpo (8 dígitos, con ceros a la izquierda) y dígito verificador de un RIF. */
+function partesRif(doc) {
+  let d = soloDigitos(doc);
+  while (d.length > 9 && d.charAt(0) === '0') d = d.substring(1);
+  if (d.length === 9) return { cuerpo: d.substring(0, 8), dv: d.charAt(8) };
+  if (!d || d.length > 9) return { cuerpo: d, dv: null };
+  return { cuerpo: ('00000000' + d).slice(-8), dv: null };
+}
+
+/**
+ * Agrega el dígito verificador a un RIF que llega sin él (el BDV y muchos listados lo omiten,
+ * y al escribirlo como número se pierden los ceros de la izquierda). Si ya tiene 9 dígitos no se toca.
+ */
+function completarRif(tipo, doc) {
+  const d = normalizarDocumento(tipo, doc);
+  if (!esRif(tipo) || !d || d.length >= 9 || d.length < 6) return d;
+  const dv = digitoVerificadorRif(tipo, d);
+  return dv === null ? d : ('00000000' + d).slice(-8) + dv;
+}
+
 /** Forma de guardar: la cédula sin ceros a la izquierda; el RIF conserva sus 9 dígitos (con dígito verificador). */
 function normalizarDocumento(tipo, doc) {
   let d = soloDigitos(doc);
@@ -333,20 +384,35 @@ function normalizarDocumento(tipo, doc) {
   return d.replace(/^0+/, '');
 }
 
-/** Reglas: cédula V/E de 6 a 8 dígitos; RIF J/G/C de 9 dígitos; pasaporte de 5 a 12. */
+/** Reglas: cédula V/E de 6 a 8 dígitos; RIF J/G/C de 9 dígitos con dígito verificador correcto; pasaporte de 5 a 12. */
 function estadoDocumento(tipo, doc) {
   const t = normalizarTipoDoc(tipo);
   const d = normalizarDocumento(t, doc);
-  if (!d) return 'INCOMPLETO (SIN DOCUMENTO)';
+  if (!d || !Number(d)) return 'INCOMPLETO (SIN DOCUMENTO)';
   if (!t) return 'ERROR (FALTA EL TIPO V/E/J/G)';
   if (t === 'V' || t === 'E') return d.length >= 6 && d.length <= 8 ? 'VÁLIDO' : `ERROR (CÉDULA DE ${d.length} DÍG.: DEBE TENER 6 A 8)`;
-  if (esRif(t)) return d.length === 9 ? 'VÁLIDO' : `ERROR (RIF DE ${d.length} DÍG.: DEBE TENER 9)`;
+  if (esRif(t)) {
+    if (d.length === 9) {
+      const dv = digitoVerificadorRif(t, d.substring(0, 8));
+      return dv === null || String(dv) === d.charAt(8) ? 'VÁLIDO' : `ERROR (DÍGITO VERIFICADOR ${d.charAt(8)}: DEBERÍA SER ${dv})`;
+    }
+    if (d.length >= 6 && d.length <= 8) {
+      const dv = digitoVerificadorRif(t, d);
+      return `ERROR (RIF DE ${d.length} DÍG.: FALTA EL DÍGITO VERIFICADOR${dv === null ? '' : ', SERÍA ' + dv})`;
+    }
+    return `ERROR (RIF DE ${d.length} DÍG.: DEBE TENER 9)`;
+  }
   return d.length >= 5 && d.length <= 12 ? 'VÁLIDO' : `ERROR (PASAPORTE DE ${d.length} DÍG.)`;
 }
 
+/** Número comparable: el RIF por su cuerpo de 8 dígitos (sin verificador); la cédula sin ceros. */
+function nucleoDocumento(tipo, doc) {
+  return esRif(tipo) ? partesRif(doc).cuerpo.replace(/^0+/, '') : limpiarDocumento(doc);
+}
+
 /**
- * Compara documentos tolerando que el banco envíe el RIF sin dígito verificador (8 dígitos)
- * y el registro lo tenga completo (9), o al revés.
+ * Compara documentos tolerando que el banco envíe el RIF sin dígito verificador (8 dígitos),
+ * sin ceros a la izquierda, o con un verificador distinto (el registro puede tenerlo mal).
  */
 function mismoDocumento(tipoA, docA, tipoB, docB) {
   const a = limpiarDocumento(docA);
@@ -354,19 +420,63 @@ function mismoDocumento(tipoA, docA, tipoB, docB) {
   if (!a || !b) return false;
   if (a === b) return true;
   if (!esRif(tipoA) && !esRif(tipoB)) return false;
-  const da = soloDigitos(docA);
-  const db = soloDigitos(docB);
-  if (da.length === 9 && db.length <= 8) return limpiarDocumento(da.substring(0, 8)) === b;
-  if (db.length === 9 && da.length <= 8) return limpiarDocumento(db.substring(0, 8)) === a;
-  return false;
+  return partesRif(docA).cuerpo.replace(/^0+/, '') === partesRif(docB).cuerpo.replace(/^0+/, '');
 }
 
-/** Cédula: 12.345.678 · RIF de 9 dígitos: 30648928-2 */
 /** Clave para comparar documentos en mapas: el RIF se compara sin dígito verificador. */
 function claveDocumento(tipo, doc) {
   const t = normalizarTipoDoc(tipo);
-  const d = limpiarDocumento(doc);
-  return t + (esRif(t) && soloDigitos(doc).replace(/^0+/, '').length === 9 ? d.substring(0, 8) : d);
+  return t + nucleoDocumento(t, doc);
+}
+
+/** Distancia de edición con transposición de vecinos (Damerau restringida). */
+function distanciaEdicion(a, b) {
+  const m = a.length;
+  const n = b.length;
+  const d = [];
+  for (let i = 0; i <= m; i++) { d[i] = [i]; }
+  for (let j = 0; j <= n; j++) { d[0][j] = j; }
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      const costo = a.charAt(i - 1) === b.charAt(j - 1) ? 0 : 1;
+      d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + costo);
+      if (i > 1 && j > 1 && a.charAt(i - 1) === b.charAt(j - 2) && a.charAt(i - 2) === b.charAt(j - 1)) {
+        d[i][j] = Math.min(d[i][j], d[i - 2][j - 2] + 1);
+      }
+    }
+  }
+  return d[m][n];
+}
+
+function subcadenaComunMayor(a, b) {
+  let mayor = 0;
+  for (let i = 0; i < a.length; i++) {
+    for (let j = 0; j < b.length; j++) {
+      let k = 0;
+      while (i + k < a.length && j + k < b.length && a.charAt(i + k) === b.charAt(j + k)) k++;
+      if (k > mayor) mayor = k;
+    }
+  }
+  return mayor;
+}
+
+/**
+ * ¿Parece el mismo documento con un error de tipeo? Devuelve el motivo o null.
+ * Ej.: V-3186420 y V-31864205 (falta el último dígito) → sugerencia.
+ */
+function parecidoDocumento(tipoA, docA, tipoB, docB) {
+  const a = nucleoDocumento(tipoA, docA);
+  const b = nucleoDocumento(tipoB, docB);
+  if (!a || !b || a === b || Math.min(a.length, b.length) < 6) return null;
+  const distancia = distanciaEdicion(a, b);
+  if (distancia === 1) {
+    if (a.length !== b.length) return 'le falta o sobra un dígito';
+    const iguales = a.split('').sort().join('') === b.split('').sort().join('');
+    return iguales ? 'tiene dos dígitos invertidos' : 'tiene un dígito distinto';
+  }
+  const comun = subcadenaComunMayor(a, b);
+  if (comun >= 7 && Math.abs(a.length - b.length) <= 1) return `coinciden ${comun} dígitos seguidos`;
+  return null;
 }
 
 function documentoConPuntos(doc, tipo) {
@@ -440,7 +550,7 @@ function copiar(obj) {
  * Módulo: Capa de datos (db.*). Toda la lógica pasa por aquí; nadie llama a SpreadsheetApp directo.
  * Al migrar a PostgreSQL solo se reescribe este archivo manteniendo la misma interfaz.
  * Sistema: ERP Alcaldía de Guanipa · Módulo de Órdenes
- * Versión: 1.0.6-beta
+ * Versión: 1.0.7-beta
  * © 2026 Soluciones AFFINITY. Todos los derechos reservados.
  */
 
@@ -464,6 +574,7 @@ const ESQUEMA = {
     ['op_calculo', 'j'], ['op_contrato', 't'], ['orden_compra_id', 't'], ['op_imputacion', 'j'],
     ['op_generada', 'b'], ['op_pdf_id', 't'], ['op_pdf_url', 't'], ['op_generada_en', 't'],
     ['op_generada_por', 't'], ['op_version', 'n', '0'],
+    ['op_con_factura', 'b'], ['op_borrador_en', 't'],
     ['motivo_anulacion', 't'], ['anulado_por', 't'], ['anulado_en', 't']
   ],
   OrdenesCompra: [
@@ -959,7 +1070,7 @@ function recortarDetalle(detalle) {
 /**
  * Módulo: API (punto de entrada web). Recibe {accion, datos, token} por POST y responde JSON.
  * Sistema: ERP Alcaldía de Guanipa · Módulo de Órdenes
- * Versión: 1.0.6-beta
+ * Versión: 1.0.7-beta
  * © 2026 Soluciones AFFINITY. Todos los derechos reservados.
  */
 
@@ -999,6 +1110,7 @@ function rutasApi() {
     'beneficiarios.buscar': { fn: beneficiariosBuscar, permiso: 'ver' },
     'beneficiarios.guardar': { fn: beneficiariosGuardar, permiso: 'beneficiarios.editar', escritura: true },
     'beneficiarios.detalle': { fn: beneficiariosDetalle, permiso: 'ver' },
+    'beneficiarios.importar': { fn: beneficiariosImportar, permiso: 'beneficiarios.editar', escritura: true },
 
     'tasas.listar': { fn: tasasListar, permiso: 'ver' },
     'tasas.consultar': { fn: tasasConsultar, permiso: 'ver' },
@@ -1109,7 +1221,10 @@ function sesionIniciar(datos, usuario) {
       bancos: BANCOS,
       firmas_oc: cfg.firmas_oc,
       institucion: cfg.institucion,
-      tolerancia_diferencia: cfg.tolerancia_diferencia
+      tolerancia_diferencia: toleranciaCuadreOP(),
+      umbral_fondo_negro: umbralFondoNegro(),
+      categorias_sin_factura: CATEGORIAS_SIN_FACTURA,
+      orden_retenciones: ORDEN_RETENCIONES_FORMULARIO
     },
     tasa_hoy: tasaParaFecha(hoyISO())
   };
@@ -1548,7 +1663,7 @@ function tasasImportarHistoricoApi(datos, usuario) {
  * Reglas: cédula V/E de 6 a 8 dígitos, RIF J/G/C de 9 dígitos, cuenta de 20 dígitos de un banco existente.
  * Los datos con errores se guardan marcados (vienen de migraciones y conciliaciones) y salen primero en la lista.
  * Sistema: ERP Alcaldía de Guanipa · Módulo de Órdenes
- * Versión: 1.0.6-beta
+ * Versión: 1.0.7-beta
  * © 2026 Soluciones AFFINITY. Todos los derechos reservados.
  */
 
@@ -1785,6 +1900,97 @@ function beneficiariosDetalle(datos) {
   };
 }
 
+/* ---------- Importar un listado de beneficiarios (Excel, CSV o texto pegado) ---------- */
+
+function columnasListadoBeneficiarios(filas) {
+  for (let i = 0; i < Math.min(filas.length, 15); i++) {
+    const enc = filas[i].map((c) => normalizarTexto(c));
+    const col = {
+      tipo: indiceColumna(enc, [/^TIPO( DE)?( DOC| DOCUMENTO)?$/, /^TIPO/, /^V ?\/ ?[EJG]/]),
+      documento: indiceColumna(enc, [/DOCUMENTO/, /CEDULA|RIF|C\.I/]),
+      nombre: indiceColumna(enc, [/NOMBRE|RAZON SOCIAL|BENEFICIARIO/]),
+      cuenta: indiceColumna(enc, [/CUENTA/])
+    };
+    if (col.documento > -1 && col.nombre > -1) return Object.assign(col, { fila: i });
+  }
+  return null;
+}
+
+function leerListadoBeneficiarios(datos) {
+  let filas;
+  if (datos.archivo && datos.archivo.base64) filas = leerArchivoConciliacion(datos.archivo).filas;
+  else if (datos.texto) filas = textoAFilas(datos.texto);
+  else throw new ErrorApp('Adjunte el archivo del listado o pegue sus filas.', 'VALIDACION');
+  const col = columnasListadoBeneficiarios(filas);
+  if (!col) throw new ErrorApp('No se encontraron las columnas del listado. Se necesitan al menos "Documento" (cédula/RIF) y "Nombre o Razón Social".', 'VALIDACION');
+  const validos = [];
+  const omitidos = [];
+  let rifCompletados = 0;
+  filas.slice(col.fila + 1).forEach((f, i) => {
+    const fila = col.fila + i + 2;
+    const crudo = String(f[col.documento] === undefined ? '' : f[col.documento]).trim();
+    const nombre = normalizarNombre(f[col.nombre]);
+    if (!crudo && !nombre) return;
+    const conLetra = crudo.match(/^\s*([VEJGPC])\s*-?\s*\d/i);
+    const letra = conLetra ? conLetra[1] : '';
+    const tipo = normalizarTipoDoc(col.tipo > -1 && f[col.tipo] ? f[col.tipo] : letra);
+    const normal = normalizarDocumento(tipo, crudo);
+    const documento = completarRif(tipo, crudo);
+    if (!tipo || !documento || !Number(documento) || nombre.length < 3) {
+      omitidos.push({ fila, nombre: nombre || '(sin nombre)', documento: crudo, motivo: !tipo ? 'Sin tipo de documento' : (!Number(documento) ? 'Sin cédula/RIF' : 'Sin nombre') });
+      return;
+    }
+    if (documento !== normal) rifCompletados++;
+    validos.push({ tipo_doc: tipo, documento, nombre, cuenta: col.cuenta > -1 ? soloDigitos(f[col.cuenta]) : '' });
+  });
+  return { validos, omitidos, rifCompletados, filasLeidas: validos.length + omitidos.length };
+}
+
+function beneficiariosImportar(datos, usuario) {
+  const leido = leerListadoBeneficiarios(datos);
+  const consolidados = consolidarBeneficiarios(leido.validos);
+  return db.conBloqueo(() => {
+    const existentes = {};
+    db.leer('Beneficiarios').forEach((b) => { existentes[claveDocumento(b.tipo_doc, b.documento)] = b; });
+    const nuevos = [];
+    const actualizaciones = [];
+    consolidados.forEach((b) => {
+      const previo = existentes[claveDocumento(b.tipo_doc, b.documento)];
+      if (!previo) { nuevos.push(Object.assign(b, { notas: 'Importado del listado de beneficiarios' })); return; }
+      const cambios = {};
+      if (cuentaValida(b.cuenta) && !cuentaValida(previo.cuenta)) {
+        Object.assign(cambios, { cuenta: b.cuenta, banco_codigo: b.banco_codigo, banco: b.banco, estado_cuenta: 'VÁLIDO' });
+      }
+      if (estadoDocumento(b.tipo_doc, b.documento) === 'VÁLIDO' && estadoDocumento(previo.tipo_doc, previo.documento) !== 'VÁLIDO') {
+        cambios.documento = b.documento;
+      }
+      const alias = String(previo.alias || '').split('|').filter(Boolean);
+      [b.nombre].concat(String(b.alias || '').split('|')).filter(Boolean).forEach((n) => {
+        if (normalizarTexto(n) !== normalizarTexto(previo.nombre) && alias.indexOf(n) === -1 && alias.length < 10) alias.push(n);
+      });
+      if (alias.join('|') !== String(previo.alias || '')) cambios.alias = alias.join('|');
+      if (Object.keys(cambios).length) actualizaciones.push({ id: previo.id, cambios });
+    });
+    const resumen = {
+      simulacion: datos.simular === true,
+      filas_leidas: leido.filasLeidas,
+      documentos_unicos: consolidados.length,
+      nuevos: nuevos.length,
+      actualizados: actualizaciones.length,
+      sin_cambios: consolidados.length - nuevos.length - actualizaciones.length,
+      rif_completados: leido.rifCompletados,
+      nuevos_con_errores: nuevos.filter((b) => problemasBeneficiario(b).length).length,
+      omitidos: leido.omitidos.slice(0, 100),
+      total_omitidos: leido.omitidos.length
+    };
+    if (datos.simular === true) return resumen;
+    db.insertarLote('Beneficiarios', nuevos, usuario.email);
+    if (actualizaciones.length) db.actualizarLote('Beneficiarios', actualizaciones, usuario.email);
+    auditar(usuario, 'BENEFICIARIOS', 'IMPORTAR', '', Object.assign({ archivo: (datos.archivo && datos.archivo.nombre) || 'texto' }, resumen, { omitidos: resumen.total_omitidos }));
+    return resumen;
+  });
+}
+
 
 /* ===================== 12_Pagos.gs ===================== */
 /**
@@ -1835,8 +2041,21 @@ function resumenPago(p) {
     documento: p.documento, monto: p.monto, monto_usd: p.monto_usd, tasa_bcv: p.tasa_bcv,
     categoria: p.categoria, descripcion: p.descripcion, cuenta: p.cuenta, banco: p.banco,
     estado: p.estado, estado_datos: p.estado_datos, origen: p.origen, op_generada: p.op_generada === true,
-    op_pdf_url: p.op_pdf_url, orden_compra_id: p.orden_compra_id
+    op_pdf_url: p.op_pdf_url, orden_compra_id: p.orden_compra_id,
+    op_borrador: esBorradorOP(p), op_descuadre: descuadreOP(p)
   };
+}
+
+/** La orden tiene datos guardados (factura, retenciones…) pero todavía no se generó. */
+function esBorradorOP(p) {
+  return p.op_generada !== true && p.estado !== ESTADO_ANULADA && !!p.op_borrador_en;
+}
+
+/** Diferencia entre el neto calculado y lo pagado (0 si no hay factura o no hay cálculo). */
+function descuadreOP(p) {
+  const c = p.op_calculo;
+  if (!c || !c.tiene_factura || c.diferencia === null || c.diferencia === undefined) return 0;
+  return Math.abs(c.diferencia) > toleranciaCuadreOP() ? c.diferencia : 0;
 }
 
 function filtrarPagos(datos) {
@@ -1852,6 +2071,7 @@ function filtrarPagos(datos) {
     if (datos.estado_datos && p.estado_datos !== datos.estado_datos) return false;
     if (datos.op === 'GENERADA' && p.op_generada !== true) return false;
     if (datos.op === 'PENDIENTE' && (p.op_generada === true || p.estado === ESTADO_ANULADA)) return false;
+    if (datos.op === 'BORRADOR' && !esBorradorOP(p)) return false;
     if (datos.desde && p.fecha < datos.desde) return false;
     if (datos.hasta && p.fecha > datos.hasta) return false;
     if (texto) {
@@ -1878,6 +2098,7 @@ function pagosListar(datos) {
       monto_usd: redondear2(activos.reduce((s, p) => s + (p.monto_usd || 0), 0)),
       por_completar: lista.filter((p) => p.estado_datos === 'POR_COMPLETAR' && p.estado !== ESTADO_ANULADA).length,
       op_pendientes: activos.filter((p) => p.op_generada !== true).length,
+      op_borradores: activos.filter(esBorradorOP).length,
       anuladas: lista.length - activos.length
     },
     registros: lista.slice((pagina - 1) * porPagina, pagina * porPagina).map(resumenPago)
@@ -1919,7 +2140,7 @@ function normalizarEntradaPago(datos, esAdmin) {
   }
   if (esAdmin) {
     if (datos.fecha !== undefined) limpio.fecha = aFechaISO(datos.fecha);
-    if (datos.monto !== undefined) limpio.monto = redondear2(aNumero(datos.monto));
+    if (datos.monto !== undefined && datos.monto !== null && datos.monto !== '') limpio.monto = redondear2(aNumero(datos.monto));
     if (limpio.fecha === '') throw new ErrorApp('La fecha no es válida.', 'VALIDACION');
     if (limpio.monto !== undefined && !(limpio.monto > 0)) throw new ErrorApp('El monto debe ser mayor que cero.', 'VALIDACION');
   }
@@ -1933,6 +2154,11 @@ function pagosGuardar(datos, usuario) {
     if (!actual) throw new ErrorApp('No se encontró el pago.', 'NO_ENCONTRADO');
     if (actual.estado === ESTADO_ANULADA) throw new ErrorApp('El pago está anulado. Reactívelo antes de editarlo.', 'ESTADO');
     const cambios = normalizarEntradaPago(datos, esAdmin);
+    // El monto de un pago importado viene del banco: no se edita (si está mal, se anula el pago).
+    if (cambios.monto !== undefined && actual.origen !== 'MANUAL' && cambios.monto !== redondear2(actual.monto)) {
+      throw new ErrorApp('El monto viene de la conciliación bancaria y no se puede modificar. Si el pago está mal, anúlelo.', 'VALIDACION');
+    }
+    if (actual.origen !== 'MANUAL') delete cambios.monto;
     const fusion = Object.assign({}, actual, cambios);
     if (cambios.fecha && cambios.fecha !== actual.fecha) fusion.tasa_bcv = null;
     Object.assign(cambios, camposCalculadosPago(fusion));
@@ -2033,7 +2259,7 @@ function mimePorExtension(ext) {
 }
 
 function textoAFilas(texto) {
-  const lineas = String(texto || '').replace(/\r/g, '').split('\n').filter((l) => l.trim());
+  const lineas = String(texto || '').replace(/^\uFEFF/, '').replace(/\r/g, '').split('\n').filter((l) => l.trim());
   if (!lineas.length) return [];
   const muestra = lineas.slice(0, 5).join('\n');
   const separador = muestra.indexOf('\t') > -1 ? '\t' : (muestra.split(';').length > muestra.split(',').length ? ';' : null);
@@ -2111,19 +2337,20 @@ function detectarColumnasConciliacion(filas) {
 function documentoBdv(tipo, digitos) {
   const d = soloDigitos(digitos);
   const sinRelleno = d.length === 9 && d.charAt(0) === '0' ? d.substring(1) : d;
-  return esRif(tipo) ? sinRelleno.replace(/^0+(?=\d{8})/, '') : limpiarDocumento(sinRelleno);
+  // El BDV rellena con un cero y omite el dígito verificador del RIF: se calcula.
+  return esRif(tipo) ? completarRif(tipo, sinRelleno) : limpiarDocumento(sinRelleno);
 }
 
 function interpretarDescripcionBancaria(descripcion) {
   const d = normalizarTexto(descripcion);
   const vacio = { tipo_mov: 'OTRO', banco_codigo: '', tipo_doc: '', documento: '', lote: '' };
   let m = d.match(/OTROS BANCOS\s+(\d{4})\s+([A-Z])?[- ]?(\d{5,10})\b/);
-  if (m) return { tipo_mov: 'PROVEEDOR', banco_codigo: m[1], tipo_doc: normalizarTipoDoc(m[2]), documento: normalizarDocumento(m[2], m[3]), lote: '' };
+  if (m) return { tipo_mov: 'PROVEEDOR', banco_codigo: m[1], tipo_doc: normalizarTipoDoc(m[2]), documento: completarRif(m[2], m[3]), lote: '' };
   m = d.match(/\bBDV\s+([A-Z])?[- ]?(\d{5,10})\b(?:.*?\bLOTE\s*(\d+))?/);
   if (m) return { tipo_mov: 'PROVEEDOR', banco_codigo: '0102', tipo_doc: normalizarTipoDoc(m[1]), documento: documentoBdv(m[1], m[2]), lote: m[3] || '' };
   if (/NOMINA/.test(d)) return Object.assign({}, vacio, { tipo_mov: 'NOMINA' });
   m = d.match(/\b([VEJGP])[- ]?(\d{6,10})\b/);
-  if (m) return { tipo_mov: 'PROVEEDOR', banco_codigo: '', tipo_doc: m[1], documento: normalizarDocumento(m[1], m[2]), lote: '' };
+  if (m) return { tipo_mov: 'PROVEEDOR', banco_codigo: '', tipo_doc: m[1], documento: completarRif(m[1], m[2]), lote: '' };
   return vacio;
 }
 
@@ -2159,7 +2386,7 @@ function enriquecerMovimiento(mov, contexto) {
   const clave = claveMovimiento(mov.fecha, mov.descripcion, mov.monto, mov.ocurrencia);
   const r = Object.assign({}, mov, info, {
     clave, estado: 'NUEVO', observaciones: [], beneficiario: '', beneficiario_id: '', cuenta: '',
-    categoria: '', descripcion_pago: ''
+    categoria: '', descripcion_pago: '', sugerencias: []
   });
   if (contexto.claves[clave]) {
     r.estado = 'DUPLICADO';
@@ -2186,7 +2413,10 @@ function enriquecerMovimiento(mov, contexto) {
       }
       r.categoria = categoriaSugerida(ben.tipo_doc, ben.documento);
     } else {
-      r.observaciones.push('Beneficiario nuevo: complete nombre y cuenta');
+      r.sugerencias = sugerirBeneficiarios(info.tipo_doc, info.documento, contexto.beneficiarios);
+      r.observaciones.push(r.sugerencias.length
+        ? `Documento no registrado. ¿Es ${r.sugerencias[0].nombre}? (${r.sugerencias[0].motivo})`
+        : 'Beneficiario nuevo: complete nombre y cuenta');
     }
   } else {
     r.observaciones.push('No se identificó el documento del beneficiario');
@@ -2214,7 +2444,30 @@ function contextoImportacion() {
     const k = `${p.fecha}|${Number(p.monto).toFixed(2)}`;
     (porFechaMonto[k] = porFechaMonto[k] || []).push({ numero: p.numero, tipo_doc: p.tipo_doc, documento: p.documento });
   });
-  return { claves, porFechaMonto, nombreNomina: config.obtener('beneficiario_nomina') || 'PAGO DE NÓMINA' };
+  return {
+    claves, porFechaMonto, nombreNomina: config.obtener('beneficiario_nomina') || 'PAGO DE NÓMINA',
+    beneficiarios: db.leer('Beneficiarios').filter((b) => b.activo !== false)
+  };
+}
+
+/** Registrados cuyo documento se parece al del banco (error de tipeo en uno de los dos). Máximo 3. */
+function sugerirBeneficiarios(tipo, documento, lista) {
+  const grupo = (t) => (esRif(t) ? 'RIF' : 'CEDULA');
+  return (lista || [])
+    .filter((b) => !tipo || grupo(b.tipo_doc) === grupo(tipo))
+    .map((b) => ({
+      b, motivo: parecidoDocumento(tipo || b.tipo_doc, documento, b.tipo_doc, b.documento),
+      comun: subcadenaComunMayor(nucleoDocumento(tipo || b.tipo_doc, documento), nucleoDocumento(b.tipo_doc, b.documento))
+    }))
+    .filter((x) => x.motivo)
+    // Primero los que comparten la secuencia más larga de dígitos.
+    .sort((x, y) => (y.comun - x.comun) || ((x.b.tipo_doc === tipo ? 0 : 1) - (y.b.tipo_doc === tipo ? 0 : 1)))
+    .slice(0, 3)
+    .map((x) => ({
+      id: x.b.id, nombre: x.b.nombre, tipo_doc: x.b.tipo_doc, documento: x.b.documento,
+      cuenta: cuentaValida(x.b.cuenta) ? x.b.cuenta : '', motivo: x.motivo,
+      categoria: categoriaSugerida(x.b.tipo_doc, x.b.documento)
+    }));
 }
 
 /* ---------- API ---------- */
@@ -2278,6 +2531,16 @@ function conciliacionConfirmar(datos, usuario) {
       contexto.claves[mov.clave] = 'en proceso';
       if (m.categoria && categorias.indexOf(m.categoria) > -1) mov.categoria = m.categoria;
       if (m.descripcion_pago) mov.descripcion_pago = mayusculas(m.descripcion_pago).substring(0, 1000);
+      if (m.beneficiario_elegido && !mov.beneficiario_id && mov.tipo_mov !== 'NOMINA') {
+        // El usuario confirmó una sugerencia: se usa el registrado y se guarda el documento del banco como referencia.
+        const ben = db.porId('Beneficiarios', m.beneficiario_elegido);
+        if (ben) {
+          mov.observacion_documento = `Documento en el banco: ${mov.tipo_doc}-${mov.documento}`;
+          Object.assign(mov, { beneficiario_id: ben.id, beneficiario: ben.nombre, tipo_doc: ben.tipo_doc, documento: ben.documento });
+          if (cuentaValida(ben.cuenta)) mov.cuenta = ben.cuenta;
+          if (!mov.categoria) mov.categoria = categoriaSugerida(ben.tipo_doc, ben.documento);
+        }
+      }
       if (m.beneficiario && !mov.beneficiario_id && mov.tipo_mov !== 'NOMINA') mov.beneficiario = normalizarNombre(m.beneficiario).substring(0, 200);
       if (m.cuenta && !mov.cuenta && cuentaValida(m.cuenta)) mov.cuenta = formatearCuenta(m.cuenta);
       validos.push(mov);
@@ -2293,7 +2556,8 @@ function conciliacionConfirmar(datos, usuario) {
         tipo_doc: m.tipo_doc, documento: m.documento, monto: m.monto, categoria: m.categoria,
         descripcion: m.descripcion_pago, cuenta: m.cuenta, banco_codigo: m.cuenta ? codigoBanco(m.cuenta) : m.banco_codigo,
         tasa_bcv: m.tasa_bcv, monto_usd: m.monto_usd, estado: ESTADO_ACTIVA, origen: 'CONCILIACION',
-        clave_conciliacion: m.clave, referencia_banco: m.descripcion, lote: m.lote, importacion_id: importacionId,
+        clave_conciliacion: m.clave, referencia_banco: m.observacion_documento ? `${m.descripcion} · ${m.observacion_documento}` : m.descripcion,
+        lote: m.lote, importacion_id: importacionId,
         op_generada: false, op_version: 0
       };
       p.banco = p.banco_codigo ? nombreBanco(p.banco_codigo) : '';
@@ -2335,18 +2599,35 @@ function conciliacionHistorial() {
 /**
  * Módulo: Orden de Pago (factura, retenciones, imputación, PDF).
  * Sistema: ERP Alcaldía de Guanipa · Módulo de Órdenes
- * Versión: 1.0.2-beta
+ * Versión: 1.0.7-beta
  * © 2026 Soluciones AFFINITY. Todos los derechos reservados.
  */
 
-/** Cálculo puro (sin acceso a datos) para poder probarlo y reutilizarlo en el ERP. */
-function calcularOrdenPago(entrada, retencionesConfig, ivaPctBase, montoPagado) {
-  const base = redondear2(aNumero(entrada.base_imponible) || 0);
+function toleranciaCuadreOP() {
+  const t = Number(config.obtener('tolerancia_diferencia'));
+  return t >= 0 && !isNaN(t) && config.obtener('tolerancia_diferencia') !== undefined ? t : 1;
+}
+
+function umbralFondoNegro() {
+  return Number(config.obtener('umbral_fondo_negro')) || CONFIG_BASE.umbral_fondo_negro.valor;
+}
+
+/**
+ * Cálculo puro (sin acceso a datos) para poder probarlo y reutilizarlo en el ERP.
+ * El Fondo Negro Primero no se elige: se aplica solo cuando el total de la factura supera el umbral.
+ * Sin factura (con_factura = false) no hay IVA ni retenciones: la orden es por lo pagado.
+ */
+function calcularOrdenPago(entrada, retencionesConfig, ivaPctBase, montoPagado, umbralFN) {
+  const conFactura = entrada.con_factura !== false;
+  const base = conFactura ? redondear2(aNumero(entrada.base_imponible) || 0) : 0;
   const ivaPct = entrada.iva_pct !== undefined && entrada.iva_pct !== null && entrada.iva_pct !== ''
     ? Number(entrada.iva_pct) : Number(ivaPctBase);
   const iva = redondear2(base * ivaPct / 100);
   const total = redondear2(base + iva);
-  const seleccion = Array.isArray(entrada.retenciones) ? entrada.retenciones : [];
+  const umbral = Number(umbralFN) || CONFIG_BASE.umbral_fondo_negro.valor;
+  const fondoNegro = total > umbral;
+  const seleccion = (Array.isArray(entrada.retenciones) ? entrada.retenciones : []).filter((c) => c !== CODIGO_FONDO_NEGRO);
+  if (fondoNegro) seleccion.push(CODIGO_FONDO_NEGRO);
   const bases = { BASE: base, IVA: iva, TOTAL: total, NINGUNA: 0 };
   const filas = retencionesConfig.map((r) => {
     const seleccionada = base > 0 && seleccion.indexOf(r.codigo) > -1 && Number(r.porcentaje) > 0;
@@ -2364,11 +2645,14 @@ function calcularOrdenPago(entrada, retencionesConfig, ivaPctBase, montoPagado) 
   const montoEmpresa = tieneFactura ? redondear2(total - totalRetenciones) : null;
   const pagado = redondear2(montoPagado || 0);
   return {
+    con_factura: conFactura,
     tiene_factura: tieneFactura,
     base_imponible: tieneFactura ? base : null,
     iva_pct: ivaPct,
     iva: tieneFactura ? iva : null,
     total_factura: tieneFactura ? total : null,
+    fondo_negro_automatico: tieneFactura && fondoNegro,
+    umbral_fondo_negro: umbral,
     retenciones: filas,
     total_retenciones: tieneFactura ? totalRetenciones : null,
     monto_empresa: montoEmpresa,
@@ -2376,6 +2660,16 @@ function calcularOrdenPago(entrada, retencionesConfig, ivaPctBase, montoPagado) 
     monto_pagado: pagado,
     diferencia: tieneFactura ? redondear2(pagado - montoEmpresa) : null
   };
+}
+
+/** Motivo por el que la orden no puede emitirse con estos datos, o '' si está bien. */
+function problemaCuadreOP(calculo) {
+  if (!calculo) return '';
+  if (calculo.tiene_factura && Math.abs(calculo.diferencia) > toleranciaCuadreOP()) {
+    return `El neto calculado (${formatoBs(calculo.monto_empresa)}) no coincide con lo pagado (${formatoBs(calculo.monto_pagado)}): ` +
+      `diferencia de ${formatoBs(calculo.diferencia)} Corrija la base imponible o las retenciones.`;
+  }
+  return '';
 }
 
 function normalizarImputacionOP(imp, fechaPago) {
@@ -2401,7 +2695,7 @@ function textoOrdenVinculada(oc) {
 function datosPlantillaOP(pago) {
   const cfg = config.todo();
   const oc = pago.orden_compra_id ? db.porId('OrdenesCompra', pago.orden_compra_id) : null;
-  const calculo = pago.op_calculo || calcularOrdenPago({}, cfg.retenciones, cfg.iva_pct, pago.monto);
+  const calculo = pago.op_calculo || calcularOrdenPago({ con_factura: false }, cfg.retenciones, cfg.iva_pct, pago.monto, umbralFondoNegro());
   const imputacion = pago.op_imputacion || normalizarImputacionOP({}, pago.fecha);
   if (!imputacion.orden && oc) imputacion.orden = textoOrdenVinculada(oc);
   return {
@@ -2434,13 +2728,15 @@ function generarPdfOP(pago, usuario) {
   const faltan = faltantesPago(pago);
   if (faltan.length) throw new ErrorApp(`Complete los datos del pago antes de generar la orden: ${faltan.join(', ')}.`, 'INCOMPLETO', faltan);
   if (pago.estado === ESTADO_ANULADA) throw new ErrorApp('La orden está anulada; no se puede generar el PDF.', 'ESTADO');
+  const problema = problemaCuadreOP(pago.op_calculo);
+  if (problema) throw new ErrorApp(problema, 'DESCUADRE');
   const html = plantillaOrdenPago(datosPlantillaOP(pago));
   const version = (Number(pago.op_version) || 0) + 1;
   const nombre = `OP_${pago.numero}_${pago.fecha}_${nombreArchivoSeguro(pago.beneficiario)}${version > 1 ? '_v' + version : ''}`;
   const archivo = guardarPdf(html, nombre, carpetaDocumentos('OP', pago.fecha));
   const r = db.actualizar('Pagos', pago.id, {
     op_generada: true, op_pdf_id: archivo.id, op_pdf_url: archivo.url,
-    op_generada_en: ahoraISO(), op_generada_por: usuario.email, op_version: version
+    op_generada_en: ahoraISO(), op_generada_por: usuario.email, op_version: version, op_borrador_en: ''
   }, usuario.email);
   auditar(usuario, 'ORDEN_PAGO', version > 1 ? 'REGENERAR_PDF' : 'GENERAR_PDF', pago.id, { numero: pago.numero, version, archivo: archivo.id });
   return { pago: r.despues, pdf_url: archivo.url, html };
@@ -2451,7 +2747,7 @@ function generarPdfOP(pago, usuario) {
 function opCalcular(datos) {
   const cfg = config.todo();
   const pago = datos.id ? db.porId('Pagos', datos.id) : null;
-  return calcularOrdenPago(datos, cfg.retenciones, cfg.iva_pct, pago ? pago.monto : aNumero(datos.monto_pagado));
+  return calcularOrdenPago(datos, cfg.retenciones, cfg.iva_pct, pago ? pago.monto : aNumero(datos.monto_pagado), umbralFondoNegro());
 }
 
 function opGuardar(datos, usuario) {
@@ -2468,24 +2764,37 @@ function opGuardar(datos, usuario) {
     } else {
       ordenId = '';
     }
-    const retenciones = (Array.isArray(datos.retenciones) ? datos.retenciones : [])
-      .filter((c) => cfg.retenciones.some((r) => r.codigo === c));
-    const calculo = calcularOrdenPago(Object.assign({}, datos, { retenciones }), cfg.retenciones, cfg.iva_pct, pago.monto);
+    if (datos.generar_pdf) {
+      const faltan = faltantesPago(pago);
+      if (faltan.length) throw new ErrorApp(`Complete los datos del pago antes de generar la orden: ${faltan.join(', ')}.`, 'INCOMPLETO', faltan);
+    }
+    const conFactura = datos.con_factura !== false;
+    const retenciones = conFactura ? (Array.isArray(datos.retenciones) ? datos.retenciones : [])
+      .filter((c) => cfg.retenciones.some((r) => r.codigo === c) && c !== CODIGO_FONDO_NEGRO) : [];
+    const calculo = calcularOrdenPago(Object.assign({}, datos, { retenciones, con_factura: conFactura }), cfg.retenciones, cfg.iva_pct, pago.monto, umbralFondoNegro());
+    if (conFactura && !calculo.tiene_factura && (datos.generar_pdf || pago.op_generada === true)) {
+      throw new ErrorApp('Indique la base imponible de la factura, o desmarque "Tiene factura" si el pago no lleva factura.', 'VALIDACION');
+    }
+    // Una orden que no cuadra con lo pagado solo puede quedar como borrador.
+    const problema = problemaCuadreOP(calculo);
+    if (problema && (datos.generar_pdf || pago.op_generada === true)) throw new ErrorApp(problema, 'DESCUADRE');
     const cambios = {
-      op_factura: textoSeguro(datos.factura, 40),
+      op_con_factura: conFactura,
+      op_factura: conFactura ? textoSeguro(datos.factura, 40) : '',
       op_base_imponible: calculo.base_imponible,
       op_iva_pct: calculo.iva_pct,
-      op_retenciones: retenciones,
+      op_retenciones: calculo.retenciones.filter((f) => f.seleccionada).map((f) => f.codigo),
       op_calculo: calculo,
       op_contrato: textoSeguro(datos.contrato, 60),
       orden_compra_id: ordenId,
-      op_imputacion: normalizarImputacionOP(datos.imputacion, pago.fecha)
+      op_imputacion: normalizarImputacionOP(datos.imputacion, pago.fecha),
+      op_borrador_en: pago.op_generada === true ? '' : ahoraISO()
     };
     const r = db.actualizar('Pagos', pago.id, cambios, usuario.email);
     auditar(usuario, 'ORDEN_PAGO', 'GUARDAR', pago.id, Object.assign({ numero: pago.numero }, diferencias(r.antes, r.despues)));
     const actualizado = db.porId('Pagos', pago.id);
     if (datos.generar_pdf) return Object.assign(generarPdfOP(actualizado, usuario), { calculo });
-    return { pago: r.despues, calculo, html: plantillaOrdenPago(datosPlantillaOP(actualizado)) };
+    return { pago: r.despues, calculo, borrador: pago.op_generada !== true, aviso: problema, html: plantillaOrdenPago(datosPlantillaOP(actualizado)) };
   });
 }
 
@@ -2496,6 +2805,7 @@ function opVista(datos) {
     html: plantillaOrdenPago(datosPlantillaOP(pago)),
     titulo: `Orden de Pago N° ${pago.numero}`,
     faltan: faltantesPago(pago),
+    descuadre: problemaCuadreOP(pago.op_calculo),
     pdf_url: pago.op_pdf_url || ''
   };
 }
@@ -3222,6 +3532,7 @@ function panelResumen(datos) {
       por_completar: activos.filter((p) => p.estado_datos === 'POR_COMPLETAR').length,
       op_pendientes: activos.filter((p) => p.op_generada !== true).length,
       op_generadas: activos.filter((p) => p.op_generada === true).length,
+      op_borradores: activos.filter(esBorradorOP).length,
       anuladas: pagosMes.length - activos.length,
       sin_tasa: activos.filter((p) => !(p.tasa_bcv > 0)).length,
       ordenes_compra: ordenesMes.filter((o) => o.tipo === 'COMPRA').length,
@@ -3322,6 +3633,11 @@ const VALIDADORES_CONFIG = {
   tolerancia_diferencia: (v) => {
     const n = aNumero(v);
     if (!(n >= 0)) throw new ErrorApp('La tolerancia debe ser un número positivo.', 'VALIDACION');
+    return n;
+  },
+  umbral_fondo_negro: (v) => {
+    const n = aNumero(v);
+    if (!(n > 0)) throw new ErrorApp('El umbral del Fondo Negro Primero debe ser mayor que cero.', 'VALIDACION');
     return n;
   }
 };
@@ -3711,7 +4027,7 @@ function agregarAdministrador(email, nombre) {
  * Módulo: Entorno de pruebas. Una base de datos aparte con datos ficticios para practicar
  * todas las funciones sin tocar la información real. Usuarios y tasas BCV se comparten con producción.
  * Sistema: ERP Alcaldía de Guanipa · Módulo de Órdenes
- * Versión: 1.0.6-beta
+ * Versión: 1.0.7-beta
  * © 2026 Soluciones AFFINITY. Todos los derechos reservados.
  */
 
@@ -3730,14 +4046,14 @@ function cuentaFicticia(banco, oficina, control, numero) {
  */
 function beneficiariosFicticios() {
   return [
-    { k: 'pinos', tipo_doc: 'J', documento: '401234567', nombre: 'INVERSIONES LOS PINOS DEL SUR, C.A.', cuenta: cuentaFicticia('0102', '0123', '45', '0000123456') },
+    { k: 'pinos', tipo_doc: 'J', documento: '401234569', nombre: 'INVERSIONES LOS PINOS DEL SUR, C.A.', cuenta: cuentaFicticia('0102', '0123', '45', '0000123456') },
     { k: 'figuera', tipo_doc: 'V', documento: '14567890', nombre: 'MARÍA JOSÉ FIGUERA LEÓN', cuenta: '0134031230123456789', cuenta_real: cuentaFicticia('0134', '0312', '30', '1234567890') },
     { k: 'mendez', tipo_doc: 'V', documento: '123456789', documento_real: '12345678', nombre: 'CARLOS EDUARDO MÉNDEZ RIVAS', cuenta: cuentaFicticia('0105', '0045', '11', '0045123987') },
     { k: 'rondon', tipo_doc: 'V', documento: '9876543', nombre: 'LUIS ALBERTO RONDÓN', cuenta: cuentaFicticia('0191', '0077', '21', '2100456321') },
-    { k: 'redes', tipo_doc: 'J', documento: '412345678', nombre: 'TECNOLOGÍA Y REDES GUANIPA, C.A.', cuenta: cuentaFicticia('0172', '0194', '81', '9400112233') },
-    { k: 'tigre', tipo_doc: 'J', documento: '298765431', nombre: 'TRANSPORTE Y SERVICIOS EL TIGRE, C.A.', cuenta: cuentaFicticia('0108', '0360', '11', '0100654987') },
-    { k: 'fundacion', tipo_doc: 'J', documento: '312345670', nombre: 'FUNDACIÓN DEPORTIVA GUANIPA', cuenta: cuentaFicticia('0999', '0102', '33', '0000987654'), cuenta_real: cuentaFicticia('0102', '0412', '33', '0000987654') },
-    { k: 'oriente', tipo_doc: 'J', documento: '50123456', documento_real: '501234561', nombre: 'SUMINISTROS ORIENTE 2020, C.A.', cuenta: cuentaFicticia('0163', '0220', '14', '2200778899') },
+    { k: 'redes', tipo_doc: 'J', documento: '412345672', nombre: 'TECNOLOGÍA Y REDES GUANIPA, C.A.', cuenta: cuentaFicticia('0172', '0194', '81', '9400112233') },
+    { k: 'tigre', tipo_doc: 'J', documento: '298765437', nombre: 'TRANSPORTE Y SERVICIOS EL TIGRE, C.A.', cuenta: cuentaFicticia('0108', '0360', '11', '0100654987') },
+    { k: 'fundacion', tipo_doc: 'J', documento: '312345675', nombre: 'FUNDACIÓN DEPORTIVA GUANIPA', cuenta: cuentaFicticia('0999', '0102', '33', '0000987654'), cuenta_real: cuentaFicticia('0102', '0412', '33', '0000987654') },
+    { k: 'oriente', tipo_doc: 'J', documento: '50123456', documento_real: '501234566', nombre: 'SUMINISTROS ORIENTE 2020, C.A.', cuenta: cuentaFicticia('0163', '0220', '14', '2200778899') },
     { k: 'salazar', tipo_doc: 'E', documento: '81234567', nombre: 'ANA KARINA SALAZAR', cuenta: cuentaFicticia('0175', '0301', '50', '0071234560') },
     { k: 'palma', tipo_doc: 'V', documento: '12345', nombre: 'JOSÉ GREGORIO PALMA', cuenta: cuentaFicticia('0102', '0456', '78', '0011223344') },
     { k: 'aguaclara', tipo_doc: 'J', documento: '297654321', nombre: 'COOPERATIVA AGUA CLARA, R.L.', cuenta: '011401230456789012345' },
@@ -3777,10 +4093,10 @@ function conciliacionFicticia(hoy) {
   return [
     'Fecha;Referencia;Descripción;Débito;Crédito',
     `${dia(2)};PR-90001;PAGO A PROVEEDORES BDV J040123456 LOTE 00500101;198.250,00;`,
-    `${dia(3)};PR-90002;PAGO A PROVEEDORES OTROS BANCOS 0172 J412345678;311.400,00;`,
+    `${dia(3)};PR-90002;PAGO A PROVEEDORES OTROS BANCOS 0172 J412345672;311.400,00;`,
     `${dia(5)};PR-90003;PAGO DE NOMINA;4.250.118,20;`,
-    `${dia(6)};PR-90004;PAGO A PROVEEDORES BDV V018765432 LOTE 00500102;24.000,00;`,
-    `${dia(6)};PR-90005;PAGO A PROVEEDORES OTROS BANCOS 0134 J305556667;67.800,00;`,
+    `${dia(6)};PR-90004;PAGO A PROVEEDORES BDV V001876543 LOTE 00500102;24.000,00;`,
+    `${dia(6)};PR-90005;PAGO A PROVEEDORES OTROS BANCOS 0134 J305556660;67.800,00;`,
     `${dia(6)};;TRANSFERENCIA RECIBIDA;;150.000,00`
   ].join('\n');
 }
@@ -3869,11 +4185,18 @@ function enviarAPapelera(id) {
 }
 
 /** Crea (o reinicia) el entorno de pruebas con datos ficticios y lo deja activo. */
-function crearEntornoPruebas(usuario) {
+function crearEntornoPruebas(usuario, copiarReales) {
   return db.conBloqueo(() => {
     const { props, idPruebas } = propiedadesEntorno();
     db.usarEntorno(ENTORNO_PRODUCCION);
     const configProduccion = db.leer('Config').map((r) => ({ clave: r.clave, valor: r.valor, descripcion: r.descripcion }));
+    // Copia de los beneficiarios reales: permite practicar con conciliaciones reales y ver las sugerencias.
+    const campos = ESQUEMA.Beneficiarios.map((c) => c[0]);
+    const copiaBeneficiarios = copiarReales ? db.leer('Beneficiarios').map((b) => {
+      const r = {};
+      campos.forEach((k) => { if (b[k] !== undefined) r[k] = b[k]; });
+      return r;
+    }) : [];
 
     const libro = SpreadsheetApp.create(NOMBRE_LIBRO_PRUEBAS);
     DriveApp.getFileById(libro.getId()).moveTo(subcarpeta(carpetaRaiz(), CARPETA_PRUEBAS));
@@ -3893,6 +4216,8 @@ function crearEntornoPruebas(usuario) {
     db.insertarLote('Config', configPruebas, usuario.email);
     config.invalidar();
     const sembrado = sembrarDatosFicticios(usuario.email);
+    if (copiaBeneficiarios.length) db.insertarLote('Beneficiarios', copiaBeneficiarios, usuario.email);
+    sembrado.beneficiarios_reales = copiaBeneficiarios.length;
     auditar(usuario, 'ENTORNO', 'CREAR_PRUEBAS', libro.getId(), sembrado);
 
     enviarAPapelera(idPruebas);
@@ -3942,7 +4267,7 @@ function entornoEstadoApi() {
 
 function entornoCrearApi(datos, usuario) {
   if (datos.confirmacion !== 'PRUEBAS') throw new ErrorApp('Escriba PRUEBAS para confirmar.', 'VALIDACION');
-  return crearEntornoPruebas(usuario);
+  return crearEntornoPruebas(usuario, datos.copiar_beneficiarios !== false);
 }
 
 function entornoCambiarApi(datos, usuario) {

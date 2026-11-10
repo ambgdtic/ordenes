@@ -161,6 +161,14 @@ textarea.campo { min-height: 70px; resize: vertical; }
 .barra-cat { height: 8px; border-radius: 4px; background: var(--superficie-2); overflow: hidden; }
 .barra-cat > span { display: block; height: 100%; background: #1f5f4a; }
 
+/* v1.0.7 */
+.enlace { background: none; border: 0; padding: 0; color: #1f5f4a; text-decoration: underline; cursor: pointer; font: inherit; }
+.enlace:hover { color: #154535; }
+.descripcion-pago { color: var(--texto-suave, #4b5563); white-space: normal; overflow-wrap: anywhere; max-width: 46ch; margin-top: 2px; }
+.sugerencia { display: block; width: 100%; text-align: left; border: 1px dashed #1f5f4a; background: #eef6f2; border-radius: 6px; padding: 4px 8px; cursor: pointer; font-size: .82rem; }
+.sugerencia:hover, .sugerencia:focus-visible { background: #dcefe6; outline: 2px solid #1f5f4a; outline-offset: 1px; }
+.ayuda .enlace { font-size: inherit; }
+
 </style>
 </head>
 <body class="min-h-screen">
@@ -178,7 +186,7 @@ window.CONFIG = { API_URL: 'https://script.google.com/macros/s/AKfycbxigx2eZgRXu
 /**
  * Módulo: Núcleo de la interfaz (sesión, API, enrutador, componentes).
  * Sistema: ERP Alcaldía de Guanipa · Módulo de Órdenes
- * Versión: 1.0.6-beta
+ * Versión: 1.0.7-beta
  * © 2026 Soluciones AFFINITY. Todos los derechos reservados.
  */
 'use strict';
@@ -235,6 +243,16 @@ function idUnico() { return (window.crypto && crypto.randomUUID) ? crypto.random
 
 /* ---------- Reglas de documentos (las mismas del servidor) ---------- */
 const reglas = {
+  /** Dígito verificador del RIF (SENIAT, módulo 11). Null para C o datos no válidos. */
+  digitoRif(tipo, cuerpo) {
+    const valor = { V: 1, E: 2, J: 3, P: 4, G: 5 }[tipo];
+    const d = String(cuerpo || '').replace(/\D/g, '');
+    if (!valor || !d || d.length > 8) return null;
+    const ocho = d.padStart(8, '0');
+    const suma = valor * 4 + [3, 2, 7, 6, 5, 4, 3, 2].reduce((s, p, i) => s + Number(ocho[i]) * p, 0);
+    const resto = 11 - (suma % 11);
+    return resto >= 10 ? 0 : resto;
+  },
   documento(tipo, doc) {
     const t = String(tipo || '').toUpperCase();
     let d = String(doc || '').replace(/\D/g, '');
@@ -242,7 +260,18 @@ const reglas = {
     if (!d) return { ok: false, vacio: true, texto: 'Solo números.' };
     if (!t) return { ok: false, texto: 'Falta el tipo (V, E, J, G o P).' };
     if (t === 'V' || t === 'E') return d.length >= 6 && d.length <= 8 ? { ok: true, texto: 'Cédula válida.' } : { ok: false, texto: `La cédula tiene ${d.length} dígitos; debe tener entre 6 y 8.` };
-    if (['J', 'G', 'C'].includes(t)) return d.length === 9 ? { ok: true, texto: `RIF ${t}-${d.slice(0, 8)}-${d.slice(8)}` } : { ok: false, texto: `El RIF tiene ${d.length} dígitos; debe tener 9 (incluido el dígito verificador).` };
+    if (['J', 'G', 'C'].includes(t)) {
+      if (d.length === 9) {
+        const dv = reglas.digitoRif(t, d.slice(0, 8));
+        if (dv !== null && String(dv) !== d[8]) return { ok: false, texto: `El dígito verificador debería ser ${dv} (${t}-${d.slice(0, 8)}-${dv}). Revise el RIF.`, sugerido: d.slice(0, 8) + dv };
+        return { ok: true, texto: `RIF ${t}-${d.slice(0, 8)}-${d.slice(8)}` };
+      }
+      if (d.length >= 6 && d.length <= 8) {
+        const dv = reglas.digitoRif(t, d);
+        if (dv !== null) { const c = d.padStart(8, '0'); return { ok: false, texto: `Falta el dígito verificador: sería ${t}-${c}-${dv}.`, sugerido: c + dv }; }
+      }
+      return { ok: false, texto: `El RIF tiene ${d.length} dígitos; debe tener 9 (incluido el dígito verificador).` };
+    }
     return d.length >= 5 && d.length <= 12 ? { ok: true, texto: 'Pasaporte.' } : { ok: false, texto: 'Pasaporte de 5 a 12 caracteres.' };
   },
   cuenta(c) {
@@ -257,6 +286,11 @@ const reglas = {
 };
 
 /* ---------- Componentes de interfaz ---------- */
+/** Ventanas abiertas (la última es la de arriba). Escape cierra la de arriba aunque el foco se haya perdido. */
+const MODALES = [];
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && MODALES.length) { e.preventDefault(); MODALES[MODALES.length - 1](); }
+});
 const ui = {
   iconos() { if (window.lucide && lucide.createIcons) lucide.createIcons(); },
 
@@ -279,16 +313,20 @@ const ui = {
     const previo = document.activeElement;
     document.body.appendChild(fondo);
     document.body.style.overflow = 'hidden';
-    const cerrar = () => {
+    let cerrado = false;
+    const cerrar = (sinFoco) => {
+      if (cerrado) return;
+      cerrado = true;
       fondo.remove();
+      MODALES.splice(MODALES.indexOf(cerrar), 1);
       if (!$('.fondo-modal')) document.body.style.overflow = '';
-      if (previo && previo.focus) previo.focus();
+      if (sinFoco !== true && previo && previo.focus) previo.focus();
       if (alCerrar) alCerrar();
     };
+    MODALES.push(cerrar);
     fondo.addEventListener('mousedown', (e) => { if (e.target === fondo) fondo.dataset.fuera = '1'; });
     fondo.addEventListener('mouseup', (e) => { if (e.target === fondo && fondo.dataset.fuera === '1') cerrar(); fondo.dataset.fuera = ''; });
-    fondo.addEventListener('keydown', (e) => { if (e.key === 'Escape') { e.stopPropagation(); cerrar(); } });
-    $$('[data-cerrar]', fondo).forEach((b) => b.addEventListener('click', cerrar));
+    $$('[data-cerrar]', fondo).forEach((b) => b.addEventListener('click', () => cerrar()));
     ui.iconos();
     const foco = $('input:not([type=hidden]):not([readonly]), select, textarea, button.btn-prim', fondo) || $('[data-cerrar]', fondo);
     setTimeout(() => foco && foco.focus(), 30);
@@ -437,6 +475,14 @@ const ui = {
     const revisar = () => {
       const r = reglas.documento(selectTipo.value, input.value);
       ayuda.textContent = r.texto;
+      if (r.sugerido) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = 'enlace ml-1';
+        b.textContent = 'Usar ese';
+        b.addEventListener('click', () => { input.value = r.sugerido; revisar(); input.dispatchEvent(new Event('change', { bubbles: true })); });
+        ayuda.append(' ', b);
+      }
       const error = !r.ok && !r.vacio;
       ayuda.classList.toggle('error', error);
       input.classList.toggle('error', error);
@@ -738,6 +784,8 @@ const App = (() => {
     document.title = `${modulo.titulo} · ERP Guanipa`;
     // Cada navegación dibuja en un contenedor nuevo: si una pantalla anterior termina de cargar tarde,
     // escribe en un contenedor ya retirado y su error no se muestra.
+    // Al cambiar de pantalla se cierran las ventanas abiertas de la anterior.
+    MODALES.slice().reverse().forEach((cerrar) => cerrar(true));
     const n = ++vistaActual;
     const vista = document.createElement('div');
     vista.innerHTML = '<div class="suave p-6">Cargando…</div>';
@@ -788,6 +836,7 @@ App.registrar({
         <div class="kpi-valor mt-1">${valor}</div><div class="suave text-xs mt-1">${extra || '&nbsp;'}</div>
       </${enlace ? 'a' : 'div'}>`;
     const avisos = [];
+    if (k.op_borradores) avisos.push(`<a href="#/pagos?op=BORRADOR&anio=${anio}&mes=${mes}">${k.op_borradores} orden(es) con borrador guardado</a> en curso: revíselas y genérelas.`);
     if (k.por_completar) avisos.push(`<a href="#/pagos?estado_datos=POR_COMPLETAR&anio=${anio}&mes=${mes}">${k.por_completar} pago(s) por completar</a> antes de poder emitir su Orden de Pago.`);
     if (k.sin_tasa) avisos.push(`${k.sin_tasa} pago(s) sin tasa BCV. <a href="#/tasas">Revise las tasas</a>.`);
     if (d.beneficiarios_con_problemas) avisos.push(`<a href="#/beneficiarios?estado=PROBLEMA">${d.beneficiarios_con_problemas} beneficiario(s)</a> con errores en la cédula/RIF o en la cuenta.`);
@@ -851,7 +900,7 @@ App.registrar({
 ;
 /**
  * Módulo: Pagos realizados y Órdenes de Pago.
- * Sistema: ERP Alcaldía de Guanipa · Módulo de Órdenes · v1.0.0-beta
+ * Sistema: ERP Alcaldía de Guanipa · Módulo de Órdenes · v1.0.7-beta
  * © 2026 Soluciones AFFINITY.
  */
 'use strict';
@@ -860,29 +909,63 @@ const Pagos = (() => {
   const r2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 
   /** Mismo cálculo que el servidor (calcularOrdenPago) para mostrar el resultado al instante. */
-  function calcularOP(entrada, retenciones, ivaPct, pagado) {
-    const base = r2(fmt.aNumero(entrada.base_imponible) || 0);
+  function calcularOP(entrada, retenciones, ivaPct, pagado, umbralFN) {
+    const conFactura = entrada.con_factura !== false;
+    const base = conFactura ? r2(fmt.aNumero(entrada.base_imponible) || 0) : 0;
     const iva = r2(base * Number(ivaPct) / 100);
     const total = r2(base + iva);
+    const fondoNegro = total > (Number(umbralFN) || 100000);
+    const elegidas = entrada.retenciones.filter((c) => c !== 'FONDO_NEGRO').concat(fondoNegro ? ['FONDO_NEGRO'] : []);
     const bases = { BASE: base, IVA: iva, TOTAL: total, NINGUNA: 0 };
     const filas = retenciones.map((r) => {
-      const sel = base > 0 && entrada.retenciones.includes(r.codigo) && Number(r.porcentaje) > 0;
+      const sel = base > 0 && elegidas.includes(r.codigo) && Number(r.porcentaje) > 0;
       return Object.assign({}, r, { seleccionada: sel, valor_procesar: sel ? bases[r.base] : null, valor_retencion: sel ? r2(bases[r.base] * r.porcentaje / 100) : null });
     });
     const totalRet = r2(filas.reduce((s, f) => s + (f.valor_retencion || 0), 0));
     const filaIva = filas.find((f) => f.codigo === 'IVA');
     const empresa = base > 0 ? r2(total - totalRet) : null;
     return {
-      base, iva, total, filas, totalRet, empresa,
+      conFactura, base, iva, total, filas, totalRet, empresa, fondoNegro: base > 0 && fondoNegro,
       restanteIva: base > 0 ? (filaIva && filaIva.seleccionada ? r2(iva - filaIva.valor_retencion) : 0) : null,
       diferencia: base > 0 ? r2(pagado - empresa) : null
     };
   }
 
+  /**
+   * Base imponible que hace que el neto sea igual a lo pagado. Cada retención es proporcional a la base,
+   * así que se despeja y luego se ajusta al céntimo. Devuelve null si no hay una base exacta.
+   */
+  function baseDesdePagado(pagado, elegidas, retenciones, ivaPct, umbralFN, tolerancia) {
+    const coef = (conFN) => {
+      const i = Number(ivaPct) / 100;
+      const porBase = { BASE: 1, IVA: i, TOTAL: 1 + i, NINGUNA: 0 };
+      const ret = retenciones.filter((r) => Number(r.porcentaje) > 0 && (elegidas.includes(r.codigo) || (conFN && r.codigo === 'FONDO_NEGRO')) && (conFN || r.codigo !== 'FONDO_NEGRO'))
+        .reduce((s, r) => s + porBase[r.base] * r.porcentaje / 100, 0);
+      return 1 + i - ret;
+    };
+    let mejor = null;
+    [false, true].forEach((conFN) => {
+      const estimada = r2(pagado / coef(conFN));
+      for (let d = -300; d <= 300; d++) {
+        const b = r2(estimada + d / 100);
+        const k = calcularOP({ base_imponible: b, retenciones: elegidas }, retenciones, ivaPct, pagado, umbralFN);
+        if (k.fondoNegro !== conFN) continue;
+        if (!mejor || Math.abs(k.diferencia) < Math.abs(mejor.diferencia)) mejor = { base: b, diferencia: k.diferencia };
+        if (k.diferencia === 0) return;
+      }
+    });
+    return mejor && Math.abs(mejor.diferencia) <= tolerancia ? mejor : null;
+  }
+
   function estadoPill(p) {
     if (p.estado === 'ANULADA') return '<span class="pill pill-peligro">Anulada</span>';
-    if (p.estado_datos === 'POR_COMPLETAR') return '<span class="pill pill-aviso">Por completar</span>';
+    if (p.estado_datos === 'POR_COMPLETAR') return `<span class="pill pill-aviso">Por completar</span>${p.op_borrador ? ' <span class="pill pill-info">Con borrador</span>' : ''}`;
     if (p.op_generada) return '<span class="pill pill-ok">OP generada</span>';
+    if (p.op_borrador) {
+      return p.op_descuadre
+        ? `<span class="pill pill-peligro" title="Borrador guardado: el neto no cuadra con lo pagado (${esc(fmt.bs(p.op_descuadre))})">Borrador · no cuadra</span>`
+        : '<span class="pill pill-info" title="Hay datos de la orden guardados; falta generarla">Borrador en curso</span>';
+    }
     return '<span class="pill pill-neutro">OP pendiente</span>';
   }
 
@@ -905,7 +988,7 @@ const Pagos = (() => {
       <div class="tarjeta p-3 mb-3 flex flex-wrap gap-2 items-center">
         ${ui.selectorPeriodo(filtros.anio, filtros.mes)}
         <select id="f-datos" class="campo" style="width:auto" aria-label="Estado de los datos">${ui.opciones([{ valor: 'POR_COMPLETAR', texto: 'Por completar' }, { valor: 'COMPLETO', texto: 'Completos' }], filtros.estado_datos, 'Datos: todos')}</select>
-        <select id="f-op" class="campo" style="width:auto" aria-label="Orden de pago">${ui.opciones([{ valor: 'PENDIENTE', texto: 'OP pendiente' }, { valor: 'GENERADA', texto: 'OP generada' }], filtros.op, 'OP: todas')}</select>
+        <select id="f-op" class="campo" style="width:auto" aria-label="Orden de pago">${ui.opciones([{ valor: 'PENDIENTE', texto: 'OP pendiente' }, { valor: 'BORRADOR', texto: 'Con borrador en curso' }, { valor: 'GENERADA', texto: 'OP generada' }], filtros.op, 'OP: todas')}</select>
         <select id="f-estado" class="campo" style="width:auto" aria-label="Estado">${ui.opciones([{ valor: 'ACTIVA', texto: 'Activas' }, { valor: 'ANULADA', texto: 'Anuladas' }], filtros.estado, 'Estado: todos')}</select>
         <select id="f-cat" class="campo" style="width:auto;max-width:220px" aria-label="Categoría">${ui.opciones(cats, filtros.categoria, 'Todas las categorías')}</select>
         <div class="relative flex-1 min-w-[200px]"><label class="sr-only" for="f-texto">Buscar</label>
@@ -938,6 +1021,7 @@ const Pagos = (() => {
           <span class="pill pill-info">Total: ${fmt.bs(r.totales.monto)} · ${fmt.usd(r.totales.monto_usd)}</span>
           <span class="pill pill-aviso">${r.totales.por_completar} por completar</span>
           <span class="pill pill-neutro">${r.totales.op_pendientes} OP pendientes</span>
+          ${r.totales.op_borradores ? `<a class="pill pill-info" href="#/pagos?anio=${filtros.anio}&mes=${filtros.mes}&op=BORRADOR">${r.totales.op_borradores} con borrador en curso</a>` : ''}
           ${r.totales.anuladas ? `<span class="pill pill-peligro">${r.totales.anuladas} anuladas</span>` : ''}`;
         if (!r.registros.length) { tabla.innerHTML = '<div class="suave p-6">No hay pagos con esos filtros.</div>'; $('#pag').innerHTML = ''; return; }
         tabla.innerHTML = `<table class="tabla"><thead><tr><th>N°</th><th class="hidden md:table-cell">Fecha</th><th>Beneficiario</th><th class="hidden lg:table-cell">Categoría</th>
@@ -946,7 +1030,8 @@ const Pagos = (() => {
             <td class="font-semibold">${x.numero}</td>
             <td class="hidden md:table-cell whitespace-nowrap">${fmt.fecha(x.fecha)}</td>
             <td><div class="font-medium">${esc(x.beneficiario || '— sin beneficiario —')}</div>
-              <div class="suave text-xs">${esc(fmt.doc(x.tipo_doc, x.documento))} ${x.descripcion ? '· ' + esc(x.descripcion.slice(0, 70)) : ''}</div>
+              <div class="suave text-xs">${esc(fmt.doc(x.tipo_doc, x.documento))}</div>
+              ${x.descripcion ? `<div class="text-xs descripcion-pago">${esc(x.descripcion)}</div>` : ''}
               <div class="md:hidden mt-1 flex flex-wrap items-center gap-1"><span class="suave text-xs">${fmt.fecha(x.fecha)}</span> ${estadoPill(x)}</div>
               <div class="md:hidden acciones mt-1">${acciones(x)}</div></td>
             <td class="hidden lg:table-cell">${ui.pillCategoria(x.categoria)}</td>
@@ -1015,7 +1100,8 @@ const Pagos = (() => {
           <div class="sm:col-span-2"><label class="etiqueta" for="p-fecha">Fecha del pago</label>
             <input id="p-fecha" type="date" class="campo" value="${esc(p.fecha || '')}" ${nuevo || esAdmin ? '' : 'readonly'} required></div>
           <div class="sm:col-span-2"><label class="etiqueta" for="p-monto">Monto pagado (Bs.)</label>
-            <input id="p-monto" class="campo num" inputmode="decimal" value="${p.monto ? esc(fmt.num(p.monto)) : ''}" ${nuevo || esAdmin ? '' : 'readonly'} required></div>
+            <input id="p-monto" class="campo num" inputmode="decimal" value="${p.monto ? esc(fmt.num(p.monto)) : ''}" ${nuevo || (esAdmin && p.origen === 'MANUAL') ? '' : 'readonly'} required>
+            ${!nuevo && p.origen !== 'MANUAL' ? '<p class="ayuda">Viene del banco: no se modifica. Si está mal, anule el pago.</p>' : ''}</div>
           <div class="sm:col-span-2"><label class="etiqueta" for="p-numero">N° de orden</label>
             <input id="p-numero" class="campo" inputmode="numeric" value="${esc(p.numero || '')}" ${nuevo && esAdmin ? 'placeholder="Automático"' : 'readonly'}></div>
           <div class="sm:col-span-6"><label class="etiqueta" for="p-ben">Beneficiario o proveedor</label>
@@ -1074,7 +1160,8 @@ const Pagos = (() => {
         id, beneficiario: $('#p-ben', el).value, tipo_doc: $('#p-tipo', el).value, documento: $('#p-doc', el).value,
         cuenta: $('#p-cuenta', el).value, categoria: $('#p-cat', el).value, descripcion: $('#p-desc', el).value
       };
-      if (nuevo || esAdmin) { datosForm.fecha = $('#p-fecha', el).value; datosForm.monto = fmt.aNumero($('#p-monto', el).value); }
+      if (nuevo || esAdmin) datosForm.fecha = $('#p-fecha', el).value;
+      if (nuevo || (esAdmin && p.origen === 'MANUAL')) datosForm.monto = fmt.aNumero($('#p-monto', el).value);
       if (nuevo && $('#p-numero', el).value.trim()) datosForm.numero = Number($('#p-numero', el).value);
       const btn = ev.currentTarget;
       ui.ocupado(btn, true);
@@ -1089,39 +1176,72 @@ const Pagos = (() => {
   }
 
   /* ---------- Orden de Pago: factura, retenciones, imputación ---------- */
+
+  /** ¿Lleva factura? Lo guardado manda; si no hay nada, se deduce de la categoría y del tipo de documento. */
+  function conFacturaInicial(p, cat) {
+    if (p.op_borrador_en || p.op_generada || p.op_calculo) return p.op_con_factura === true || Number(p.op_base_imponible) > 0;
+    const sinFactura = cat.categorias_sin_factura || [];
+    if (p.categoria && sinFactura.includes(p.categoria)) return false;
+    if (p.tipo_doc === 'J') return true;
+    return !!p.categoria && p.tipo_doc !== 'G' && !/Vi[aá]ticos/i.test(p.categoria);
+  }
+
+  function retencionesOrdenadas(cat) {
+    const orden = cat.orden_retenciones || [];
+    const pos = (c) => (orden.indexOf(c) === -1 ? orden.length : orden.indexOf(c));
+    return cat.retenciones.filter((r) => !r.fila_titulo && r.codigo !== 'FONDO_NEGRO')
+      .map((r, i) => ({ r, i })).sort((a, b) => (pos(a.r.codigo) - pos(b.r.codigo)) || (a.i - b.i)).map((x) => x.r);
+  }
+
   async function ordenPago(id, recargar) {
     const { pago: p, faltan, orden_vinculada: ov } = await api('pagos.obtener', { id });
     const cat = App.estado.catalogos;
+    const umbral = Number(cat.umbral_fondo_negro) || 100000;
+    const tol = Number(cat.tolerancia_diferencia) >= 0 ? Number(cat.tolerancia_diferencia) : 1;
+    const fondoNegro = cat.retenciones.find((r) => r.codigo === 'FONDO_NEGRO');
     const guardado = borrador.leer('op:' + id);
     const inicial = guardado || {
+      con_factura: conFacturaInicial(p, cat),
       factura: p.op_factura || '', base_imponible: p.op_base_imponible ? fmt.num(p.op_base_imponible) : '',
-      retenciones: p.op_retenciones || [], contrato: p.op_contrato || '', orden_compra_id: p.orden_compra_id || '',
+      retenciones: (p.op_retenciones || []).filter((c) => c !== 'FONDO_NEGRO'), contrato: p.op_contrato || '', orden_compra_id: p.orden_compra_id || '',
       imputacion: p.op_imputacion || { fecha: '', lineas: [] }
     };
+    if (inicial.con_factura === undefined) inicial.con_factura = conFacturaInicial(p, cat);
     let ordenes = [];
     try { ordenes = (await api('oc.listar', { texto: p.documento || p.beneficiario || '', estado: 'ACTIVA', por_pagina: 50 })).registros; } catch (e) { ordenes = []; }
     if (ov && !ordenes.some((o) => o.id === ov.id)) ordenes.unshift(Object.assign({}, ov, { beneficiario: p.beneficiario }));
     const lineas = [0, 1, 2].map((i) => (inicial.imputacion.lineas || [])[i] || {});
     const campoLinea = (i, k, ph, w) => `<input class="campo" data-l="${i}" data-k="${k}" value="${esc(lineas[i][k] || '')}" placeholder="${ph}" aria-label="${ph} línea ${i + 1}" style="min-width:${w || 52}px">`;
+    const deBase = (r) => ({ BASE: 'de la base', IVA: 'del IVA', TOTAL: 'del total' })[r.base] || r.base;
     const m = ui.modal({
       titulo: `Orden de Pago N° ${p.numero} · ${esc(p.beneficiario || '')}`,
       tamano: 'grande',
       cuerpo: `
-        ${faltan.length ? `<div class="alerta alerta-aviso mb-3">Antes de generar el PDF complete: ${esc(faltan.join(', '))}.</div>` : ''}
-        ${guardado ? '<div class="alerta alerta-info mb-3">Se recuperó un borrador sin guardar de esta orden.</div>' : ''}
+        ${faltan.length ? `<div class="alerta alerta-aviso mb-3">Antes de generar la orden complete: ${esc(faltan.join(', '))}.</div>` : ''}
+        ${guardado ? '<div class="alerta alerta-info mb-3">Se recuperó lo que estaba escribiendo en este equipo y no se había guardado.</div>'
+          : (p.op_borrador_en && !p.op_generada ? `<div class="alerta alerta-info mb-3">Borrador guardado el ${fmt.fechaHora(p.op_borrador_en)}. Revise y genere la orden cuando cuadre.</div>` : '')}
         <div class="grid grid-cols-1 lg:grid-cols-5 gap-4">
           <form id="form-op" class="lg:col-span-3 space-y-4" novalidate>
-            <fieldset class="grid grid-cols-1 sm:grid-cols-3 gap-3">
-              <legend class="font-semibold mb-2">Factura</legend>
-              <div><label class="etiqueta" for="op-fac">N° de factura</label><input id="op-fac" class="campo" maxlength="40" value="${esc(inicial.factura)}"></div>
-              <div><label class="etiqueta" for="op-base">Base imponible (Bs.)</label><input id="op-base" class="campo num" inputmode="decimal" value="${esc(inicial.base_imponible)}" placeholder="Vacío si no hay factura"></div>
-              <div><label class="etiqueta">IVA</label><input class="campo" readonly value="${fmt.num(cat.iva_pct, 0)}%"></div>
-            </fieldset>
             <fieldset>
-              <legend class="font-semibold mb-2">Retenciones aplicables</legend>
-              <div class="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-2">
-                ${cat.retenciones.filter((r) => !r.fila_titulo).map((r) => `<label class="check"><input type="checkbox" value="${r.codigo}" ${inicial.retenciones.includes(r.codigo) ? 'checked' : ''}>
-                  <span>${esc(r.nombre)} <span class="suave text-xs">(${fmt.num(r.porcentaje, r.porcentaje % 1 ? 2 : 0)}% de ${({ BASE: 'la base', IVA: 'el IVA', TOTAL: 'el total' })[r.base] || r.base})</span></span></label>`).join('')}
+              <legend class="font-semibold mb-2">Factura</legend>
+              <label class="check mb-1"><input type="checkbox" id="op-confac" ${inicial.con_factura ? 'checked' : ''}>
+                <span><strong>Este pago tiene factura</strong> (empresa o firma personal)</span></label>
+              <p class="suave text-xs mb-3">Desmarque para pagos a particulares, ayudas, subvenciones, dozavos, créditos adicionales o nómina: no llevan factura, IVA ni retenciones.</p>
+              <div id="op-bloque-factura" class="space-y-4">
+                <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  <div><label class="etiqueta" for="op-fac">N° de factura</label><input id="op-fac" class="campo" maxlength="40" value="${esc(inicial.factura)}"></div>
+                  <div><label class="etiqueta" for="op-base">Base imponible (Bs.)</label><input id="op-base" class="campo num" inputmode="decimal" value="${esc(inicial.base_imponible)}">
+                    <button type="button" class="enlace text-xs mt-1" id="op-calc-base">Calcular base desde lo pagado</button></div>
+                  <div><label class="etiqueta" for="op-iva">IVA</label><input id="op-iva" class="campo" readonly value="${fmt.num(cat.iva_pct, 0)}%"></div>
+                </div>
+                <div>
+                  <p class="font-semibold mb-2">Retenciones aplicables</p>
+                  <div class="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-2" id="op-rets">
+                    ${retencionesOrdenadas(cat).map((r) => `<label class="check"><input type="checkbox" value="${r.codigo}" ${inicial.retenciones.includes(r.codigo) ? 'checked' : ''}>
+                      <span>${esc(r.nombre)} <span class="suave text-xs">(${fmt.num(r.porcentaje, r.porcentaje % 1 ? 2 : 0)}% ${deBase(r)})</span></span></label>`).join('')}
+                  </div>
+                  ${fondoNegro ? `<p class="text-sm mt-3" id="op-fn"></p>` : ''}
+                </div>
               </div>
             </fieldset>
             <fieldset class="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -1141,14 +1261,18 @@ const Pagos = (() => {
           </form>
           <aside class="lg:col-span-2"><div class="tarjeta p-4 sticky top-2" id="op-calculo" aria-live="polite"></div></aside>
         </div>`,
-      pie: `<button class="btn" data-cerrar>Cerrar</button>
-        <button class="btn" id="op-guardar">${ico('save')} Guardar</button>
-        <button class="btn btn-prim" id="op-pdf" ${faltan.length ? 'disabled title="Complete los datos del pago primero"' : ''}>${ico('file-check')} Guardar y generar PDF</button>`
+      pie: `<span class="suave text-xs mr-auto" id="op-motivo"></span>
+        <button class="btn" data-cerrar>Cerrar</button>
+        <button class="btn" id="op-guardar" title="Guarda lo escrito aunque todavía no cuadre">${ico('save')} Guardar borrador</button>
+        <button class="btn btn-prim" id="op-pdf">${ico('file-check')} Generar orden de pago</button>`
     });
     const el = m.el;
+    const conFactura = () => $('#op-confac', el).checked;
     const leer = () => ({
-      id, factura: $('#op-fac', el).value.trim(), base_imponible: fmt.aNumero($('#op-base', el).value),
-      retenciones: $$('#form-op input[type=checkbox]:checked', el).map((c) => c.value),
+      id, con_factura: conFactura(),
+      factura: conFactura() ? $('#op-fac', el).value.trim() : '',
+      base_imponible: conFactura() ? fmt.aNumero($('#op-base', el).value) : null,
+      retenciones: conFactura() ? $$('#op-rets input[type=checkbox]:checked', el).map((c) => c.value) : [],
       contrato: $('#op-con', el).value.trim(), orden_compra_id: $('#op-oc', el).value,
       imputacion: {
         fecha: $('#op-fimp', el).value,
@@ -1159,28 +1283,54 @@ const Pagos = (() => {
         }).filter((l) => Object.values(l).some((v) => v))
       }
     });
+    /** Devuelve el motivo por el que no se puede generar, o '' si se puede. */
+    const motivoBloqueo = (k) => {
+      if (faltan.length) return `Complete primero: ${faltan.join(', ')}.`;
+      if (k.conFactura && !(k.base > 0)) return 'Indique la base imponible, o desmarque "tiene factura".';
+      if (k.conFactura && Math.abs(k.diferencia) > tol) return `El neto no cuadra con lo pagado (diferencia ${fmt.bs(k.diferencia)}).`;
+      return '';
+    };
     const pintar = () => {
       const d = leer();
-      borrador.guardar('op:' + id, Object.assign({}, d, { base_imponible: $('#op-base', el).value }));
-      const k = calcularOP({ base_imponible: d.base_imponible, retenciones: d.retenciones }, cat.retenciones, cat.iva_pct, p.monto);
-      const tol = Number(cat.tolerancia_diferencia) || 1;
-      const fila = (t, v, fuerte) => `<div class="flex justify-between py-1 ${fuerte ? 'font-semibold' : ''}"><span>${t}</span><span class="num">${v}</span></div>`;
+      $('#op-bloque-factura', el).hidden = !d.con_factura;
+      borrador.guardar('op:' + id, Object.assign({}, d, { base_imponible: $('#op-base', el).value, retenciones: $$('#op-rets input[type=checkbox]:checked', el).map((c) => c.value) }));
+      const k = calcularOP({ con_factura: d.con_factura, base_imponible: d.base_imponible, retenciones: d.retenciones }, cat.retenciones, cat.iva_pct, p.monto, umbral);
+      if ($('#op-fn', el)) {
+        $('#op-fn', el).innerHTML = `${k.fondoNegro ? '<span class="pill pill-info">Se aplica</span>' : '<span class="pill pill-neutro">No aplica</span>'}
+          <strong>${esc(fondoNegro.nombre)}</strong> <span class="suave text-xs">(${fmt.num(fondoNegro.porcentaje, 0)}% del total) · automático cuando el total de la factura pasa de ${fmt.bs(umbral)}</span>`;
+      }
+      const fila = (t, v, fuerte) => `<div class="flex justify-between gap-2 py-1 ${fuerte ? 'font-semibold' : ''}"><span>${t}</span><span class="num whitespace-nowrap">${v}</span></div>`;
+      const cuadra = k.base > 0 && Math.abs(k.diferencia) <= tol;
       $('#op-calculo', el).innerHTML = `
         <h3 class="font-semibold mb-2">Desglose</h3>
         ${fila('Monto pagado (banco)', fmt.bs(p.monto), true)}
         <div class="separador my-2"></div>
-        ${k.base > 0 ? `${fila('Sub-total', fmt.bs(k.base))}${fila(`IVA ${fmt.num(cat.iva_pct, 0)}%`, fmt.bs(k.iva))}${fila('Total factura', fmt.bs(k.total), true)}
+        ${!k.conFactura ? '<p class="text-sm">Sin factura: la orden se emite por el monto pagado, sin IVA ni retenciones.</p><div class="alerta alerta-ok mt-2">Lista para generar.</div>'
+          : k.base > 0 ? `${fila('Sub-total', fmt.bs(k.base))}${fila(`IVA ${fmt.num(cat.iva_pct, 0)}%`, fmt.bs(k.iva))}${fila('Total factura', fmt.bs(k.total), true)}
           <div class="separador my-2"></div>
           ${k.filas.filter((f) => f.seleccionada).map((f) => fila(`− ${esc(f.nombre)}`, fmt.bs(f.valor_retencion))).join('') || '<p class="suave text-sm">Sin retenciones.</p>'}
           ${fila('Total retenciones', fmt.bs(k.totalRet), true)}
           ${fila('Monto a pagar a la empresa', fmt.bs(k.empresa), true)}
           ${fila('Monto restante del IVA', fmt.bs(k.restanteIva))}
-          ${Math.abs(k.diferencia) > tol ? `<div class="alerta alerta-aviso mt-2">El neto calculado difiere de lo pagado en ${fmt.bs(k.diferencia)}. Revise la base o las retenciones.</div>` : '<div class="alerta alerta-ok mt-2">El neto calculado coincide con lo pagado.</div>'}`
-          : '<p class="suave text-sm">Sin factura: la orden se emite por el monto pagado (ayudas, subvenciones, nómina, etc.).</p>'}
+          ${cuadra ? `<div class="alerta alerta-ok mt-2">El neto coincide con lo pagado${k.diferencia ? ` (diferencia de ${fmt.bs(k.diferencia)} por redondeo)` : ''}.</div>`
+            : `<div class="alerta alerta-peligro mt-2"><strong>No cuadra:</strong> el neto difiere de lo pagado en ${fmt.bs(k.diferencia)}. La orden no se puede generar hasta que coincida; puede guardarla como borrador.</div>`}`
+          : '<p class="suave text-sm">Escriba la base imponible de la factura o use "Calcular base desde lo pagado".</p>'}
         <p class="suave text-xs mt-3">Tasa BCV ${p.tasa_bcv ? fmt.num(p.tasa_bcv, 2) : '—'} · ${fmt.usd(p.monto_usd)}</p>`;
+      const motivo = motivoBloqueo(k);
+      $('#op-pdf', el).disabled = !!motivo;
+      $('#op-pdf', el).title = motivo || 'Genera el PDF y lo guarda en Drive';
+      $('#op-motivo', el).textContent = motivo;
     };
     $('#form-op', el).addEventListener('input', demorar(pintar, 150));
     $('#form-op', el).addEventListener('change', pintar);
+    $('#op-calc-base', el).addEventListener('click', () => {
+      const elegidas = $$('#op-rets input[type=checkbox]:checked', el).map((c) => c.value);
+      const r = baseDesdePagado(p.monto, elegidas, cat.retenciones, cat.iva_pct, umbral, tol);
+      if (!r) { ui.toast('Con esas retenciones no hay una base que dé exactamente lo pagado. Revise las retenciones marcadas.', 'aviso', 7000); return; }
+      $('#op-base', el).value = fmt.num(r.base);
+      pintar();
+      ui.toast(`Base calculada: ${fmt.bs(r.base)} Compárela con la factura física antes de generar.`, 'info', 7000);
+    });
     pintar();
     const guardar = async (ev, generar) => {
       const btn = ev.currentTarget;
@@ -1190,9 +1340,12 @@ const Pagos = (() => {
         borrador.borrar('op:' + id);
         m.cerrar();
         if (recargar) recargar();
-        if (generar) ui.toast(`Orden N° ${p.numero} generada y guardada en Drive.`, 'exito');
-        else ui.toast('Datos de la orden guardados.', 'exito');
-        ui.documento({ titulo: `Orden de Pago N° ${p.numero}`, html: r.html, pdfUrl: r.pdf_url || r.pago.op_pdf_url, generarPdf: App.puede('op.generar') && !faltan.length ? () => api('op.pdf', { id }, { escritura: true }) : null });
+        if (!generar) {
+          ui.toast(r.aviso ? `Borrador guardado. ${r.aviso}` : 'Borrador guardado. Ya puede generar la orden cuando quiera.', r.aviso ? 'aviso' : 'exito', r.aviso ? 9000 : 4000);
+          return;
+        }
+        ui.toast(`Orden N° ${p.numero} generada y guardada en Drive.`, 'exito');
+        ui.documento({ titulo: `Orden de Pago N° ${p.numero}`, html: r.html, pdfUrl: r.pdf_url || r.pago.op_pdf_url, generarPdf: App.puede('op.generar') ? () => api('op.pdf', { id }, { escritura: true }) : null });
       } catch (e) { ui.error(e); } finally { ui.ocupado(btn, false); }
     };
     $('#op-guardar', el).addEventListener('click', (ev) => guardar(ev, false));
@@ -1204,8 +1357,8 @@ const Pagos = (() => {
       const v = await api('op.vista', { id });
       ui.documento({
         titulo: v.titulo, html: v.html, pdfUrl: v.pdf_url,
-        aviso: v.faltan.length ? `Datos incompletos: ${esc(v.faltan.join(', '))}. No imprima hasta completarlos.` : '',
-        generarPdf: App.puede('op.generar') && !v.faltan.length ? async () => { const r = await api('op.pdf', { id }, { escritura: true }); if (recargar) recargar(); return r; } : null
+        aviso: v.faltan.length ? `Datos incompletos: ${esc(v.faltan.join(', '))}. No imprima hasta completarlos.` : (v.descuadre ? esc(v.descuadre) : ''),
+        generarPdf: App.puede('op.generar') && !v.faltan.length && !v.descuadre ? async () => { const r = await api('op.pdf', { id }, { escritura: true }); if (recargar) recargar(); return r; } : null
       });
     } catch (e) { ui.error(e); }
   }
@@ -1218,7 +1371,7 @@ App.registrar({ id: 'pagos', titulo: 'Pagos y OP', icono: 'receipt', permiso: 'v
 ;
 /**
  * Módulo: Importación de conciliaciones bancarias (vista previa, corrección y confirmación).
- * Sistema: ERP Alcaldía de Guanipa · Módulo de Órdenes · v1.0.6-beta
+ * Sistema: ERP Alcaldía de Guanipa · Módulo de Órdenes · v1.0.7-beta
  * © 2026 Soluciones AFFINITY.
  */
 'use strict';
@@ -1342,6 +1495,23 @@ const Importar = (() => {
     }
   }
 
+  function celdaBeneficiario(m, i) {
+    if (m.beneficiario_id || m.tipo_mov === 'NOMINA') {
+      return `<div class="font-medium">${esc(m.beneficiario)}</div><div class="suave text-xs">${esc(fmt.doc(m.tipo_doc, m.documento))}${m.cuenta ? ' · ' + esc(m.cuenta) : ''}</div>`;
+    }
+    if (m.beneficiario_elegido) {
+      const g = (m.sugerencias || []).find((x) => x.id === m.beneficiario_elegido) || {};
+      return `<div class="font-medium">${esc(m.beneficiario)} <span class="pill pill-info">registrado</span></div>
+        <div class="suave text-xs">${esc(fmt.doc(g.tipo_doc, g.documento))}${m.cuenta ? ' · ' + esc(m.cuenta) : ''}</div>
+        <div class="suave text-xs">El banco envió ${esc(fmt.doc(m.tipo_doc, m.documento))} · <button type="button" class="enlace" data-deshacer>No es esta persona</button></div>`;
+    }
+    const sugerencias = (m.sugerencias || []).map((g, j) => `<button type="button" class="sugerencia" data-sug="${j}">
+        <span>¿Es <strong>${esc(g.nombre)}</strong>?</span><span class="suave text-xs block">${esc(fmt.doc(g.tipo_doc, g.documento))} · ${esc(g.motivo)}</span></button>`).join('');
+    return `<input class="campo" data-i="${i}" data-k="beneficiario" value="${esc(m.beneficiario)}" placeholder="Nombre (${esc(fmt.doc(m.tipo_doc, m.documento) || 'sin doc.')})" aria-label="Nombre del beneficiario fila ${m.fila}">
+      <input class="campo mt-1" data-i="${i}" data-k="cuenta" value="${esc(m.cuenta)}" placeholder="Cuenta 20 dígitos (opcional)" inputmode="numeric" aria-label="Cuenta fila ${m.fila}">
+      ${sugerencias ? `<div class="mt-1 space-y-1">${sugerencias}</div>` : ''}`;
+  }
+
   function mostrarVistaPrevia(r, recuperado) {
     const cats = App.estado.catalogos.categorias.map((c) => c.nombre);
     const movs = r.movimientos.map((m) => Object.assign({ elegido: m.estado === 'NUEVO' }, m));
@@ -1375,10 +1545,8 @@ const Importar = (() => {
         ${movs.map((m, i) => `<tr>
           <td><input type="checkbox" data-i="${i}" class="sel" ${m.elegido ? 'checked' : ''} ${m.estado === 'DUPLICADO' ? 'disabled' : ''} aria-label="Importar fila ${m.fila}"></td>
           <td class="whitespace-nowrap">${fmt.fecha(m.fecha)}</td>
-          <td class="text-xs" style="max-width:220px">${esc(m.descripcion)}${m.observaciones.length ? `<div class="mt-1" style="color:var(--aviso)">${m.observaciones.map(esc).join('<br>')}</div>` : ''}</td>
-          <td style="min-width:200px">${m.beneficiario_id || m.tipo_mov === 'NOMINA' ? `<div class="font-medium">${esc(m.beneficiario)}</div><div class="suave text-xs">${esc(fmt.doc(m.tipo_doc, m.documento))}${m.cuenta ? ' · ' + esc(m.cuenta) : ''}</div>`
-            : `<input class="campo" data-i="${i}" data-k="beneficiario" value="${esc(m.beneficiario)}" placeholder="Nombre (${esc(fmt.doc(m.tipo_doc, m.documento) || 'sin doc.')})" aria-label="Nombre del beneficiario fila ${m.fila}">
-               <input class="campo mt-1" data-i="${i}" data-k="cuenta" value="${esc(m.cuenta)}" placeholder="Cuenta 20 dígitos (opcional)" inputmode="numeric" aria-label="Cuenta fila ${m.fila}">`}</td>
+          <td class="text-xs" style="max-width:220px">${esc(m.descripcion)}${m.observaciones.length && !m.beneficiario_elegido ? `<div class="mt-1" style="color:var(--aviso)">${m.observaciones.map(esc).join('<br>')}</div>` : ''}</td>
+          <td style="min-width:220px" id="ben-${i}">${celdaBeneficiario(m, i)}</td>
           <td><select class="campo" data-i="${i}" data-k="categoria" style="min-width:170px" aria-label="Categoría fila ${m.fila}">${ui.opciones(cats, m.categoria, '—')}</select></td>
           <td><input class="campo" data-i="${i}" data-k="descripcion_pago" value="${esc(m.descripcion_pago)}" style="min-width:200px" aria-label="Descripción fila ${m.fila}"></td>
           <td class="num whitespace-nowrap">${fmt.bs(m.monto)}<div class="suave text-xs">${fmt.usd(m.monto_usd)}</div></td>
@@ -1397,7 +1565,34 @@ const Importar = (() => {
       $('#btn-confirmar').disabled = !n.length;
     };
     $$('.sel', paso).forEach((c) => c.addEventListener('change', () => { movs[c.dataset.i].elegido = c.checked; contar(); guardarBorrador(); }));
-    $$('[data-k]', paso).forEach((c) => c.addEventListener('change', () => { movs[c.dataset.i][c.dataset.k] = c.value; guardarBorrador(); }));
+    const enlazarCampos = (raiz) => $$('[data-k]', raiz).forEach((c) => c.addEventListener('change', () => { movs[c.dataset.i][c.dataset.k] = c.value; guardarBorrador(); }));
+    enlazarCampos(paso);
+    // Sugerencias: documento del banco parecido a uno registrado (error de tipeo en alguno de los dos).
+    const enlazarSugerencias = (i) => {
+      const celda = $(`#ben-${i}`, paso);
+      $$('[data-sug]', celda).forEach((b) => b.addEventListener('click', () => {
+        const g = movs[i].sugerencias[Number(b.dataset.sug)];
+        Object.assign(movs[i], { beneficiario_elegido: g.id, beneficiario: g.nombre, cuenta: g.cuenta || movs[i].cuenta });
+        if (!movs[i].categoria && g.categoria) {
+          movs[i].categoria = g.categoria;
+          $(`select[data-i="${i}"][data-k="categoria"]`, paso).value = g.categoria;
+        }
+        celda.innerHTML = celdaBeneficiario(movs[i], i);
+        enlazarSugerencias(i);
+        guardarBorrador();
+      }));
+      const deshacer = $('[data-deshacer]', celda);
+      if (deshacer) {
+        deshacer.addEventListener('click', () => {
+          Object.assign(movs[i], { beneficiario_elegido: '', beneficiario: '', cuenta: '' });
+          celda.innerHTML = celdaBeneficiario(movs[i], i);
+          enlazarCampos(celda);
+          enlazarSugerencias(i);
+          guardarBorrador();
+        });
+      }
+    };
+    movs.forEach((m, i) => enlazarSugerencias(i));
     $('#todos').addEventListener('change', (e) => {
       movs.forEach((m, i) => { if (m.estado === 'NUEVO') { m.elegido = e.target.checked; $(`.sel[data-i="${i}"]`).checked = e.target.checked; } });
       contar(); guardarBorrador();
@@ -1718,7 +1913,7 @@ App.registrar({ id: 'ordenes', titulo: 'Compras y servicios', icono: 'clipboard-
 /**
  * Módulo: Registro de beneficiarios y proveedores, con ficha de historial de pagos.
  * Los registros con errores de documento o cuenta aparecen primero para corregirlos.
- * Sistema: ERP Alcaldía de Guanipa · Módulo de Órdenes · v1.0.6-beta
+ * Sistema: ERP Alcaldía de Guanipa · Módulo de Órdenes · v1.0.7-beta
  * © 2026 Soluciones AFFINITY.
  */
 'use strict';
@@ -1733,7 +1928,7 @@ const Beneficiarios = (() => {
     const editar = App.puede('beneficiarios.editar');
     cont.innerHTML = `
       <div class="flex flex-wrap items-center gap-2 mb-3"><h1 class="titulo-pagina mr-auto">Beneficiarios y proveedores</h1>
-        ${editar ? `<button class="btn btn-prim" id="btn-nuevo">${ico('user-plus')} Nuevo</button>` : ''}</div>
+        ${editar ? `<button class="btn" id="btn-importar">${ico('file-up')} Importar listado</button><button class="btn btn-prim" id="btn-nuevo">${ico('user-plus')} Nuevo</button>` : ''}</div>
       <div class="tarjeta p-3 mb-3 flex flex-wrap gap-2">
         <input id="f-texto" class="campo flex-1 min-w-[220px]" placeholder="Buscar por nombre o cédula/RIF…" value="${esc(filtros.texto)}" aria-label="Buscar">
         <select id="f-estado" class="campo" style="width:auto" aria-label="Estado de los datos">${ui.opciones([{ valor: 'PROBLEMA', texto: 'Con errores en documento o cuenta' }, { valor: 'VALIDO', texto: 'Datos válidos' }], filtros.estado, 'Todos')}</select>
@@ -1746,6 +1941,7 @@ const Beneficiarios = (() => {
     $('#f-texto', cont).addEventListener('input', demorar(aplicar, 400));
     $('#f-estado', cont).addEventListener('change', aplicar);
     if ($('#btn-nuevo', cont)) $('#btn-nuevo', cont).addEventListener('click', () => formulario({}, cargar));
+    if ($('#btn-importar', cont)) $('#btn-importar', cont).addEventListener('click', () => importarListado(cargar));
 
     async function cargar() {
       tabla.innerHTML = '<div class="suave p-6">Cargando…</div>';
@@ -1825,6 +2021,70 @@ const Beneficiarios = (() => {
       }
       ui.iconos();
     } catch (e) { cuerpo.innerHTML = `<div class="alerta alerta-peligro">${esc(e.message)}</div>`; }
+  }
+
+  /* ---------- Importar listado (Excel, CSV o filas pegadas) ---------- */
+  function importarListado(recargar) {
+    let entrada = null;
+    const m = ui.modal({
+      titulo: 'Importar listado de beneficiarios',
+      tamano: 'mediano',
+      cuerpo: `
+        <p class="text-sm mb-3">Columnas necesarias: <strong>Documento</strong> (cédula/RIF), <strong>Tipo</strong> (V, E, J, G; también sirve "V-12345678" en una sola columna)
+          y <strong>Nombre o Razón Social</strong>. La <strong>cuenta</strong> es opcional. Se puede usar varias veces: no duplica, completa cuentas que falten y agrupa los nombres repetidos.
+          ${App.enPruebas() ? '<br><span class="pill pill-aviso mt-1">Está en el entorno de pruebas: se importará solo aquí.</span>' : ''}</p>
+        <label class="etiqueta" for="imp-archivo">Archivo (.xlsx, .xls, .ods o .csv)</label>
+        <input id="imp-archivo" type="file" class="campo mb-3" accept=".xlsx,.xls,.ods,.csv,.txt">
+        <label class="etiqueta" for="imp-texto">…o pegue las filas copiadas de Excel (con la fila de títulos)</label>
+        <textarea id="imp-texto" class="campo" rows="5" placeholder="Nº Documento	Tipo	Nombre o Razón Social	Número de cuenta"></textarea>
+        <div id="imp-res" class="mt-3" aria-live="polite"></div>`,
+      pie: '<button class="btn" data-cerrar>Cerrar</button><button class="btn" id="imp-sim">Revisar</button><button class="btn btn-prim" id="imp-ok" disabled>Importar</button>'
+    });
+    const el = m.el;
+    const leerEntrada = async () => {
+      const archivo = $('#imp-archivo', el).files[0];
+      if (archivo) {
+        if (archivo.size > 8 * 1024 * 1024) throw new Error('El archivo supera 8 MB.');
+        const base64 = await new Promise((ok, falla) => { const l = new FileReader(); l.onload = () => ok(String(l.result).split(',')[1]); l.onerror = () => falla(new Error('No se pudo leer el archivo.')); l.readAsDataURL(archivo); });
+        return { archivo: { nombre: archivo.name, base64 } };
+      }
+      const texto = $('#imp-texto', el).value.trim();
+      if (!texto) throw new Error('Elija un archivo o pegue las filas del listado.');
+      return { texto };
+    };
+    const mostrar = (r) => {
+      $('#imp-res', el).innerHTML = `<div class="alerta ${r.simulacion ? 'alerta-info' : 'alerta-ok'}"><strong>${r.simulacion ? 'Revisión (todavía no se guardó nada)' : 'Importación completada'}</strong>
+        <ul class="list-disc pl-5 mt-1 text-sm">
+          <li>Filas leídas: ${r.filas_leidas} · documentos distintos: ${r.documentos_unicos}</li>
+          <li>Nuevos: <strong>${r.nuevos}</strong>${r.nuevos_con_errores ? ` (${r.nuevos_con_errores} con errores en cédula/RIF o cuenta; quedarán marcados de primero)` : ''}</li>
+          <li>Ya registrados que se completan: <strong>${r.actualizados}</strong> · sin cambios: ${r.sin_cambios}</li>
+          ${r.rif_completados ? `<li>RIF a los que se agregó el dígito verificador: ${r.rif_completados}</li>` : ''}
+          ${r.total_omitidos ? `<li>Omitidos: ${r.total_omitidos}<div class="text-xs suave">${r.omitidos.slice(0, 10).map((o) => `Fila ${o.fila}: ${esc(o.nombre)} (${esc(o.motivo)})`).join('<br>')}${r.total_omitidos > 10 ? '<br>…' : ''}</div></li>` : ''}
+        </ul></div>`;
+    };
+    $('#imp-sim', el).addEventListener('click', async (ev) => {
+      const btn = ev.currentTarget;
+      ui.ocupado(btn, true);
+      try {
+        entrada = await leerEntrada();
+        const r = await api('beneficiarios.importar', Object.assign({ simular: true }, entrada), { escritura: true });
+        mostrar(r);
+        $('#imp-ok', el).disabled = !(r.nuevos || r.actualizados);
+      } catch (e) { ui.error(e); } finally { ui.ocupado(btn, false); }
+    });
+    ['#imp-archivo', '#imp-texto'].forEach((sel) => $(sel, el).addEventListener('change', () => { $('#imp-ok', el).disabled = true; entrada = null; }));
+    $('#imp-ok', el).addEventListener('click', async (ev) => {
+      const btn = ev.currentTarget;
+      if (!entrada) return;
+      ui.ocupado(btn, true);
+      try {
+        const r = await api('beneficiarios.importar', entrada, { escritura: true });
+        mostrar(r);
+        btn.disabled = true;
+        ui.toast(`${r.nuevos} beneficiario(s) nuevos y ${r.actualizados} completados.`, 'exito');
+        recargar();
+      } catch (e) { ui.error(e); } finally { ui.ocupado(btn, false); }
+    });
   }
 
   function formulario(b, recargar) {
@@ -1989,7 +2249,7 @@ App.registrar({ id: 'tasas', titulo: 'Tasa BCV', icono: 'trending-up', permiso: 
 ;
 /**
  * Módulo: Administración (estado, configuración, usuarios, auditoría y migración).
- * Sistema: ERP Alcaldía de Guanipa · Módulo de Órdenes · v1.0.6-beta
+ * Sistema: ERP Alcaldía de Guanipa · Módulo de Órdenes · v1.0.7-beta
  * © 2026 Soluciones AFFINITY.
  */
 'use strict';
@@ -2053,7 +2313,9 @@ const Admin = (() => {
           <div class="flex items-center gap-2"><h2 class="font-semibold mr-auto">${ico('flask-conical', 'inline w-4 h-4')} Entorno de pruebas</h2>${enPruebas ? '<span class="pill pill-aviso">Activo</span>' : ''}</div>
           ${e.existe_pruebas ? `${conteos(e.pruebas.conteos)}
             <p class="text-sm">Creado el ${fmt.fechaHora(e.pruebas.creado_en)} por ${esc(e.pruebas.creado_por || '')} · <a href="${esc(e.pruebas.url)}" target="_blank" rel="noopener">abrir su hoja</a></p>`
-            : '<p class="text-sm">Crea una base aparte con 12 beneficiarios ficticios (6 con errores de tipeo en cédula/RIF o cuenta) y 10 pagos de los dos meses anteriores, de categorías distintas y sin órdenes generadas. Los PDF van a una carpeta "ENTORNO DE PRUEBAS" en Drive.</p>'}
+            : '<p class="text-sm">Crea una base aparte con 12 beneficiarios ficticios (6 con errores de tipeo en cédula/RIF o cuenta), y si quiere, una copia de los beneficiarios reales, y 10 pagos de los dos meses anteriores, de categorías distintas y sin órdenes generadas. Los PDF van a una carpeta "ENTORNO DE PRUEBAS" en Drive.</p>'}
+          <label class="check text-sm"><input type="checkbox" id="ent-copiar" ${e.produccion.conteos.beneficiarios ? 'checked' : 'disabled'}>
+            <span>Incluir una copia de los ${fmt.num(e.produccion.conteos.beneficiarios, 0)} beneficiarios reales (para practicar con conciliaciones reales)</span></label>
           <div class="flex flex-wrap gap-2">
             ${!e.existe_pruebas ? `<button class="btn btn-prim" id="ent-crear">${ico('flask-conical')} Crear entorno de pruebas</button>` : ''}
             ${e.existe_pruebas && !enPruebas ? `<button class="btn btn-prim" id="ent-ir">Usar el entorno de pruebas</button>` : ''}
@@ -2087,7 +2349,7 @@ const Admin = (() => {
           <p class="mt-2">El sistema quedará en <strong>modo pruebas para todos los usuarios</strong> hasta que vuelva a producción. Los datos reales no se tocan.</p>`,
         palabra: 'PRUEBAS', textoBoton: reinicio ? 'Reiniciar' : 'Crear'
       });
-      if (ok) accion(btn, 'entorno.crear', { confirmacion: 'PRUEBAS' }, 'Entorno de pruebas listo con datos ficticios.', '#/pagos?anio=&mes=');
+      if (ok) accion(btn, 'entorno.crear', { confirmacion: 'PRUEBAS', copiar_beneficiarios: $('#ent-copiar', panel) ? $('#ent-copiar', panel).checked : true }, 'Entorno de pruebas listo.', '#/pagos?anio=&mes=');
     };
     enlazar('#ent-crear', (btn) => crear(btn, false));
     enlazar('#ent-reiniciar', (btn) => crear(btn, true));
@@ -2132,7 +2394,8 @@ const Admin = (() => {
       ${seccion('unidades', 'Unidades solicitantes', `<textarea id="unidades" class="campo" style="min-height:160px" aria-label="Unidades, una por línea">${esc(valor('unidades').join('\n'))}</textarea>`, 'Una por línea.')}
       ${seccion('institucion', 'Datos del membrete', `<div class="grid grid-cols-1 sm:grid-cols-2 gap-3">${['pais', 'estado', 'nombre', 'rif', 'ciudad', 'lugar_compra', 'pie', 'telefono'].map((k) => campo(`inst-${k}`, k.replace('_', ' '), inst[k])).join('')}</div>`)}
       ${seccion('beneficiario_nomina', 'Nombre para movimientos de nómina', campo('nomina', 'Beneficiario', valor('beneficiario_nomina')))}
-      ${seccion('tolerancia_diferencia', 'Tolerancia de diferencia en la OP', `<div class="w-40">${campo('tol', 'Bs.', valor('tolerancia_diferencia'), 'inputmode="decimal"')}</div>`, 'Diferencia aceptada entre lo pagado y el neto calculado antes de mostrar aviso.')}
+      ${seccion('tolerancia_diferencia', 'Tolerancia de diferencia en la OP', `<div class="w-40">${campo('tol', 'Bs.', valor('tolerancia_diferencia'), 'inputmode="decimal"')}</div>`, 'Diferencia máxima entre lo pagado y el neto calculado. Si la supera, la orden solo puede guardarse como borrador.')}
+      ${seccion('umbral_fondo_negro', 'Fondo Negro Primero', `<div class="w-48">${campo('umbral-fn', 'Total de factura mayor a (Bs.)', valor('umbral_fondo_negro') || 100000, 'inputmode="decimal"')}</div>`, 'Se aplica automáticamente (3% del total) cuando el total de la factura supera este monto.')}
       </div>`;
     let nCats = valor('categorias').length;
     $('#cat-mas').addEventListener('click', () => {
@@ -2150,7 +2413,8 @@ const Admin = (() => {
       unidades: () => $('#unidades').value.split('\n').map((x) => x.trim()).filter(Boolean),
       institucion: () => { const o = {}; ['pais', 'estado', 'nombre', 'rif', 'ciudad', 'lugar_compra', 'pie', 'telefono'].forEach((k) => { o[k] = $(`#inst-${k}`).value; }); return o; },
       beneficiario_nomina: () => $('#nomina').value,
-      tolerancia_diferencia: () => fmt.aNumero($('#tol').value)
+      tolerancia_diferencia: () => fmt.aNumero($('#tol').value),
+      umbral_fondo_negro: () => fmt.aNumero($('#umbral-fn').value)
     };
     $$('form[data-clave]', panel).forEach((f) => f.addEventListener('submit', async (ev) => {
       ev.preventDefault();

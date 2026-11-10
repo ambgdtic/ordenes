@@ -1646,7 +1646,7 @@ const Importar = (() => {
     paso.innerHTML = `
       <div class="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-7 gap-3 mb-3">
         ${[['Débitos leídos', s.total], ['Nuevos', s.nuevos], ['Ya importados', s.duplicados], ['Posibles duplicados', s.posibles_duplicados], ['Sin beneficiario', s.sin_beneficiario],
-          ['Período', `${fmt.fecha(s.desde)} – ${fmt.fecha(s.hasta)}`], ['Próximo N° de OP', s.proximo_numero]]
+          ['Período', `${fmt.fecha(s.desde)} – ${fmt.fecha(s.hasta)}`], s.con_numero_archivo ? ['N° de OP del archivo', `${s.numero_desde} – ${s.numero_hasta}`] : ['Próximo N° de OP', s.proximo_numero]]
           .map(([t, v]) => `<div class="tarjeta p-3"><div class="kpi-etiqueta">${t}</div><div class="font-semibold text-lg">${esc(v)}</div></div>`).join('')}
       </div>
       ${s.ignoradas ? `<p class="suave text-sm mb-2">${s.ignoradas} fila(s) sin fecha o sin débito se ignoraron (por ejemplo, la fila de totales).</p>` : ''}
@@ -1662,10 +1662,11 @@ const Importar = (() => {
           <span class="ml-auto font-semibold" id="conteo"></span>
         </div>
         <div class="tabla-env" style="max-height:60vh"><table class="tabla"><thead><tr>
-          <th><span class="sr-only">Importar</span></th><th>Fecha</th><th>Movimiento del banco</th><th>Beneficiario</th><th>Categoría</th><th>Descripción del pago</th><th class="num">Monto</th><th>Estado</th>
+          <th><span class="sr-only">Importar</span></th><th>N° OP</th><th>Fecha</th><th>Movimiento del banco</th><th>Beneficiario</th><th>Categoría</th><th>Descripción del pago</th><th class="num">Monto</th><th>Estado</th>
         </tr></thead><tbody>
         ${movs.map((m, i) => `<tr>
           <td><input type="checkbox" data-i="${i}" class="sel" ${m.elegido ? 'checked' : ''} ${m.estado === 'DUPLICADO' ? 'disabled' : ''} aria-label="Importar fila ${m.fila}"></td>
+          <td><input class="campo num" data-i="${i}" data-k="numero_op" inputmode="numeric" value="${esc(m.numero_op || '')}" placeholder="auto" style="width:80px" aria-label="N° de Orden de Pago fila ${m.fila}"></td>
           <td class="whitespace-nowrap">${fmt.fecha(m.fecha)}</td>
           <td class="text-xs" style="max-width:220px">${esc(m.descripcion)}${m.observaciones.length && !m.beneficiario_elegido ? `<div class="mt-1" style="color:var(--aviso)">${m.observaciones.map(esc).join('<br>')}</div>` : ''}</td>
           <td style="min-width:220px" id="ben-${i}">${celdaBeneficiario(m, i)}</td>
@@ -1736,7 +1737,7 @@ const Importar = (() => {
       const dudosos = elegidos.filter((m) => m.estado === 'POSIBLE_DUPLICADO').length;
       const ok = await ui.confirmar({
         titulo: 'Confirmar importación',
-        mensaje: `Se registrarán <strong>${elegidos.length}</strong> pagos por <strong>${fmt.bs(elegidos.reduce((a, m) => a + m.monto, 0))}</strong>, con números de Orden de Pago desde el <strong>${s.proximo_numero}</strong>.${dudosos ? `<br><br><span style="color:var(--aviso)">Incluye ${dudosos} posible(s) duplicado(s).</span>` : ''}`,
+        mensaje: `Se registrarán <strong>${elegidos.length}</strong> pagos por <strong>${fmt.bs(elegidos.reduce((a, m) => a + m.monto, 0))}</strong>, ${elegidos.some((m) => m.numero_op) ? `conservando el N° de Orden de Pago del archivo (${elegidos.filter((m) => m.numero_op).length})${elegidos.some((m) => !m.numero_op) ? ` y numerando el resto desde el <strong>${Math.max(s.proximo_numero, ...elegidos.map((m) => Number(m.numero_op) || 0)) + 1 > s.proximo_numero ? Math.max(...elegidos.map((m) => Number(m.numero_op) || 0)) + 1 : s.proximo_numero}</strong>` : ''}` : `con números de Orden de Pago desde el <strong>${s.proximo_numero}</strong>`}.${dudosos ? `<br><br><span style="color:var(--aviso)">Incluye ${dudosos} posible(s) duplicado(s).</span>` : ''}`,
         textoBoton: 'Importar'
       });
       if (!ok) return;

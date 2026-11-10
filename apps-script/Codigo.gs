@@ -7,19 +7,27 @@
  */
 
 /**
- * Ejecútela una vez desde el editor de Apps Script para conceder el permiso de enviar correos.
- * Envía un correo de prueba a la cuenta que recibe las solicitudes.
+ * Ejecútela desde el editor de Apps Script si el sistema muestra "No cuentas con el permiso…".
+ * Pide de una sola vez TODOS los permisos del sistema: en la pantalla de Google marque "Seleccionar todo".
+ * Al terminar envía un correo de confirmación a la cuenta dueña.
  */
-function autorizarCorreo() {
+function autorizarPermisos() {
+  if (typeof ScriptApp.requireAllScopes === 'function') ScriptApp.requireAllScopes(ScriptApp.AuthMode.FULL);
+  UrlFetchApp.fetch('https://www.googleapis.com/oauth2/v3/certs', { muteHttpExceptions: true });
   const destino = String(Session.getEffectiveUser().getEmail() || '');
-  MailApp.sendEmail(destino, '[ERP Guanipa] Correo activado', 'Las solicitudes de acceso llegarán a este correo. © Soluciones AFFINITY');
-  console.log('Correo de prueba enviado a ' + destino);
+  MailApp.sendEmail(destino, '[ERP Guanipa] Permisos completos', 'El sistema tiene todos sus permisos. Las solicitudes de acceso llegarán a este correo. © Soluciones AFFINITY');
+  console.log('Permisos completos. Correo de confirmación enviado a ' + destino);
+}
+
+/** Nombre anterior (v1.0.8): se mantiene para quien siga las instrucciones viejas. */
+function autorizarCorreo() {
+  autorizarPermisos();
 }
 
 
 const APP = {
   nombre: 'ERP Guanipa · Órdenes',
-  version: '1.0.8-beta',
+  version: '1.0.9-beta',
   zona: 'America/Caracas',
   nombreLibro: 'ERP Guanipa - Base de Datos',
   nombreCarpetaRaiz: 'ERP Guanipa - Documentos'
@@ -1122,7 +1130,7 @@ function recortarDetalle(detalle) {
 /**
  * Módulo: API (punto de entrada web). Recibe {accion, datos, token} por POST y responde JSON.
  * Sistema: ERP Alcaldía de Guanipa · Módulo de Órdenes
- * Versión: 1.0.8-beta
+ * Versión: 1.0.9-beta
  * © 2026 Soluciones AFFINITY. Todos los derechos reservados.
  */
 
@@ -1295,9 +1303,23 @@ function instalarSiFalta(token) {
   }
 }
 
+/** Error de Google por permisos no concedidos al dueño del sistema (no es culpa del usuario). */
+function esErrorDePermisos(error) {
+  return /No cuentas con el permiso|You do not have permission|Permisos necesarios|Required permissions|Authorization is required|Se necesita autorizaci/i.test(String(error && error.message));
+}
+
 function respuestaError(error, accion) {
   const esApp = error && error.name === 'ErrorApp';
   console.error(`[API] ${accion}: ${error && error.message}`, error && error.stack);
+  if (!esApp && esErrorDePermisos(error)) {
+    return {
+      ok: false,
+      codigo: 'PERMISOS_SISTEMA',
+      error: 'El sistema está en mantenimiento: falta un permiso de Google en la cuenta administradora. ' +
+        'El Director de TI debe ejecutar "autorizarPermisos" en el editor de Apps Script y marcar todos los permisos.',
+      detalle: String(error.message)
+    };
+  }
   return {
     ok: false,
     codigo: esApp ? error.codigo : 'ERROR_INTERNO',

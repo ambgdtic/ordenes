@@ -8,7 +8,7 @@
 
 const APP = {
   nombre: 'ERP Guanipa · Órdenes',
-  version: '1.0.4-beta',
+  version: '1.0.5-beta',
   zona: 'America/Caracas',
   nombreLibro: 'ERP Guanipa - Base de Datos',
   nombreCarpetaRaiz: 'ERP Guanipa - Documentos'

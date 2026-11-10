@@ -6,9 +6,20 @@
  * © 2026 Soluciones AFFINITY. Todos los derechos reservados.
  */
 
+/**
+ * Ejecútela una vez desde el editor de Apps Script para conceder el permiso de enviar correos.
+ * Envía un correo de prueba a la cuenta que recibe las solicitudes.
+ */
+function autorizarCorreo() {
+  const destino = String(Session.getEffectiveUser().getEmail() || '');
+  MailApp.sendEmail(destino, '[ERP Guanipa] Correo activado', 'Las solicitudes de acceso llegarán a este correo. © Soluciones AFFINITY');
+  console.log('Correo de prueba enviado a ' + destino);
+}
+
+
 const APP = {
   nombre: 'ERP Guanipa · Órdenes',
-  version: '1.0.7-beta',
+  version: '1.0.8-beta',
   zona: 'America/Caracas',
   nombreLibro: 'ERP Guanipa - Base de Datos',
   nombreCarpetaRaiz: 'ERP Guanipa - Documentos'
@@ -146,7 +157,11 @@ const CONFIG_BASE = {
   },
   tolerancia_diferencia: {
     descripcion: 'Diferencia máxima (Bs.) aceptada entre lo pagado y el neto calculado de la OP',
-    valor: 1
+    valor: 0.01
+  },
+  correo_solicitudes: {
+    descripcion: 'Correo que recibe las solicitudes de acceso (vacío: la cuenta dueña del sistema)',
+    valor: ''
   },
   umbral_fondo_negro: {
     descripcion: 'Total de factura (Bs.) a partir del cual se aplica automáticamente el Fondo Negro Primero',
@@ -550,7 +565,7 @@ function copiar(obj) {
  * Módulo: Capa de datos (db.*). Toda la lógica pasa por aquí; nadie llama a SpreadsheetApp directo.
  * Al migrar a PostgreSQL solo se reescribe este archivo manteniendo la misma interfaz.
  * Sistema: ERP Alcaldía de Guanipa · Módulo de Órdenes
- * Versión: 1.0.7-beta
+ * Versión: 1.0.8-beta
  * © 2026 Soluciones AFFINITY. Todos los derechos reservados.
  */
 
@@ -574,7 +589,7 @@ const ESQUEMA = {
     ['op_calculo', 'j'], ['op_contrato', 't'], ['orden_compra_id', 't'], ['op_imputacion', 'j'],
     ['op_generada', 'b'], ['op_pdf_id', 't'], ['op_pdf_url', 't'], ['op_generada_en', 't'],
     ['op_generada_por', 't'], ['op_version', 'n', '0'],
-    ['op_con_factura', 'b'], ['op_borrador_en', 't'],
+    ['op_con_factura', 'b'], ['op_borrador_en', 't'], ['op_estimada', 'b'],
     ['motivo_anulacion', 't'], ['anulado_por', 't'], ['anulado_en', 't']
   ],
   OrdenesCompra: [
@@ -595,13 +610,19 @@ const ESQUEMA = {
   ],
   Auditoria: [
     ['fecha_hora', 't'], ['usuario', 't'], ['modulo', 't'], ['accion', 't'], ['registro_id', 't'], ['detalle', 'j']
+  ],
+  SolicitudesAcceso: [
+    ['email', 't'], ['nombre', 't'], ['estado', 't'], ['solicitado_en', 't'], ['ultimo_intento', 't'], ['intentos', 'n', '0'],
+    ['notificado_en', 't'], ['error_notificacion', 't'], ['resuelto_por', 't'], ['resuelto_en', 't'], ['rol_asignado', 't'], ['motivo', 't']
   ]
 };
 
 const COLUMNAS_AUDITORIA = [['creado_en', 't'], ['creado_por', 't'], ['actualizado_en', 't'], ['actualizado_por', 't']];
 
 /** Tablas que viven siempre en la base de producción, aunque el entorno de pruebas esté activo. */
-const TABLAS_COMUNES = ['Usuarios', 'Tasas'];
+const TABLAS_COMUNES = ['Usuarios', 'Tasas', 'SolicitudesAcceso'];
+/** Tablas cuyos cambios no alteran lo que se muestra en pantallas cacheadas (no invalidan la caché). */
+const TABLAS_SIN_VERSION = ['Usuarios', 'Auditoria', 'SolicitudesAcceso'];
 const ENTORNO_PRODUCCION = 'PRODUCCION';
 const ENTORNO_PRUEBAS = 'PRUEBAS';
 
@@ -785,8 +806,32 @@ const db = (() => {
     return { cuando: ahoraISO(), quien: usuario || 'sistema' };
   }
 
+  /**
+   * Versión de los datos de un entorno: cambia con cada escritura. Las pantallas cacheadas
+   * (en el navegador y en CacheService) se reutilizan mientras la versión no cambie.
+   */
+  function claveVersion(nombreEntorno) {
+    return 'verdatos_' + nombreEntorno;
+  }
+
+  function version() {
+    const cache = CacheService.getScriptCache();
+    const clave = claveVersion(entornoActivo());
+    let v = cache.get(clave);
+    if (!v) { v = APP.version + '.' + Date.now().toString(36); cache.put(clave, v, 21600); }
+    return v;
+  }
+
+  function marcarCambio(tabla) {
+    if (TABLAS_SIN_VERSION.indexOf(tabla) > -1) return;
+    const entornos = TABLAS_COMUNES.indexOf(tabla) > -1 ? [ENTORNO_PRODUCCION, ENTORNO_PRUEBAS] : [entornoActivo()];
+    const nueva = APP.version + '.' + Date.now().toString(36) + Math.random().toString(36).substring(2, 6);
+    entornos.forEach((e) => CacheService.getScriptCache().put(claveVersion(e), nueva, 21600));
+  }
+
   function insertarLote(tabla, objetos, usuario) {
     if (!objetos.length) return [];
+    marcarCambio(tabla);
     const h = hoja(tabla);
     const datos = leer(tabla);
     const s = sello(usuario);
@@ -828,6 +873,7 @@ const db = (() => {
 
   function actualizarLote(tabla, lista, usuario) {
     if (!lista.length) return [];
+    marcarCambio(tabla);
     const h = hoja(tabla);
     const s = sello(usuario);
     const formatos = formatosFila(tabla);
@@ -895,7 +941,7 @@ const db = (() => {
   return {
     leer, porId, buscar, primero, insertar, insertarLote, actualizar, actualizarLote,
     limpiar, conBloqueo, olvidar, prepararTablas, idLibro, usarLibro, usarEntorno, olvidarEntorno,
-    entorno: entornoActivo, libroDeTabla: libro
+    entorno: entornoActivo, libroDeTabla: libro, version, marcarCambio
   };
 })();
 
@@ -961,7 +1007,7 @@ const config = (() => {
  * Módulo: Autenticación (Google Identity Services) y permisos por rol.
  * El navegador envía el ID token de Google; aquí se verifica contra Google y contra la tabla Usuarios.
  * Sistema: ERP Alcaldía de Guanipa · Módulo de Órdenes
- * Versión: 1.0.2-beta
+ * Versión: 1.0.8-beta
  * © 2026 Soluciones AFFINITY. Todos los derechos reservados.
  */
 
@@ -997,6 +1043,7 @@ function verificarTokenGoogle(token) {
 
   const email = String(info.email).toLowerCase();
   cache.put(claveCache, email, Math.min(restante, 21600));
+  if (info.name) cache.put('tkn_' + email, textoSeguro(info.name, 100), 21600);
   return email;
 }
 
@@ -1008,8 +1055,13 @@ function usuarioPorEmail(email) {
 function autenticar(token) {
   const email = verificarTokenGoogle(token);
   const usuario = usuarioPorEmail(email);
-  if (!usuario || !usuario.activo) {
-    throw new ErrorApp(`La cuenta ${email} no tiene acceso al sistema. Solicítelo a la Dirección de Tecnologías de la Información.`, 'NO_AUTORIZADO');
+  if (!usuario) {
+    // Primera vez: se registra la solicitud y se avisa por correo al administrador.
+    const s = registrarSolicitudAcceso(email, CacheService.getScriptCache().get('tkn_' + email) || '');
+    throw new ErrorApp(s.mensaje, s.codigo, { estado: s.estado, email });
+  }
+  if (!usuario.activo) {
+    throw new ErrorApp(`La cuenta ${email} está desactivada. Comuníquese con la Dirección de Tecnologías de la Información.`, 'NO_AUTORIZADO', { email });
   }
   return usuario;
 }
@@ -1070,17 +1122,17 @@ function recortarDetalle(detalle) {
 /**
  * Módulo: API (punto de entrada web). Recibe {accion, datos, token} por POST y responde JSON.
  * Sistema: ERP Alcaldía de Guanipa · Módulo de Órdenes
- * Versión: 1.0.7-beta
+ * Versión: 1.0.8-beta
  * © 2026 Soluciones AFFINITY. Todos los derechos reservados.
  */
 
 function rutasApi() {
   return {
     'sesion.iniciar': { fn: sesionIniciar, permiso: 'ver' },
-    'panel.resumen': { fn: panelResumen, permiso: 'ver' },
+    'panel.resumen': { fn: panelResumen, permiso: 'ver', cache: true },
 
-    'pagos.listar': { fn: pagosListar, permiso: 'ver' },
-    'pagos.obtener': { fn: pagosObtener, permiso: 'ver' },
+    'pagos.listar': { fn: pagosListar, permiso: 'ver', cache: true },
+    'pagos.obtener': { fn: pagosObtener, permiso: 'ver', cache: true },
     'pagos.guardar': { fn: pagosGuardar, permiso: 'pagos.editar', escritura: true },
     'pagos.crear': { fn: pagosCrear, permiso: 'pagos.editar', escritura: true },
     'pagos.anular': { fn: pagosAnular, permiso: 'op.anular', escritura: true },
@@ -1089,30 +1141,31 @@ function rutasApi() {
 
     'conciliacion.analizar': { fn: conciliacionAnalizar, permiso: 'pagos.importar' },
     'conciliacion.confirmar': { fn: conciliacionConfirmar, permiso: 'pagos.importar', escritura: true },
-    'conciliacion.historial': { fn: conciliacionHistorial, permiso: 'ver' },
+    'conciliacion.historial': { fn: conciliacionHistorial, permiso: 'ver', cache: true },
     'conciliacion.ejemplo': { fn: conciliacionEjemplo, permiso: 'pagos.importar' },
 
     'op.calcular': { fn: opCalcular, permiso: 'ver' },
+    'op.sugerir': { fn: opSugerir, permiso: 'ver' },
     'op.guardar': { fn: opGuardar, permiso: 'op.generar', escritura: true },
-    'op.vista': { fn: opVista, permiso: 'ver' },
+    'op.vista': { fn: opVista, permiso: 'ver', cache: true },
     'op.pdf': { fn: opPdf, permiso: 'op.generar', escritura: true },
 
-    'oc.listar': { fn: ocListar, permiso: 'ver' },
-    'oc.obtener': { fn: ocObtener, permiso: 'ver' },
+    'oc.listar': { fn: ocListar, permiso: 'ver', cache: true },
+    'oc.obtener': { fn: ocObtener, permiso: 'ver', cache: true },
     'oc.prellenarDesdePago': { fn: ocPrellenarDesdePago, permiso: 'ver' },
     'oc.guardar': { fn: ocGuardar, permiso: 'oc.editar', escritura: true },
     'oc.anular': { fn: ocAnular, permiso: 'oc.anular', escritura: true },
-    'oc.vista': { fn: ocVista, permiso: 'ver' },
+    'oc.vista': { fn: ocVista, permiso: 'ver', cache: true },
     'oc.vistaPrevia': { fn: ocVistaPrevia, permiso: 'ver' },
     'oc.pdf': { fn: ocPdf, permiso: 'oc.editar', escritura: true },
 
-    'beneficiarios.listar': { fn: beneficiariosListar, permiso: 'ver' },
+    'beneficiarios.listar': { fn: beneficiariosListar, permiso: 'ver', cache: true },
     'beneficiarios.buscar': { fn: beneficiariosBuscar, permiso: 'ver' },
     'beneficiarios.guardar': { fn: beneficiariosGuardar, permiso: 'beneficiarios.editar', escritura: true },
-    'beneficiarios.detalle': { fn: beneficiariosDetalle, permiso: 'ver' },
+    'beneficiarios.detalle': { fn: beneficiariosDetalle, permiso: 'ver', cache: true },
     'beneficiarios.importar': { fn: beneficiariosImportar, permiso: 'beneficiarios.editar', escritura: true },
 
-    'tasas.listar': { fn: tasasListar, permiso: 'ver' },
+    'tasas.listar': { fn: tasasListar, permiso: 'ver', cache: true },
     'tasas.consultar': { fn: tasasConsultar, permiso: 'ver' },
     'tasas.sincronizar': { fn: tasasSincronizar, permiso: 'tasas.editar', escritura: true },
     'tasas.guardarManual': { fn: tasasGuardarManual, permiso: 'tasas.editar', escritura: true },
@@ -1123,6 +1176,8 @@ function rutasApi() {
     'admin.guardarConfig': { fn: adminGuardarConfig, permiso: 'admin', escritura: true },
     'admin.usuarios': { fn: adminUsuarios, permiso: 'admin' },
     'admin.guardarUsuario': { fn: adminGuardarUsuario, permiso: 'admin', escritura: true },
+    'admin.solicitudes': { fn: adminSolicitudes, permiso: 'admin' },
+    'admin.resolverSolicitud': { fn: adminResolverSolicitud, permiso: 'admin', escritura: true },
     'admin.auditoria': { fn: adminAuditoria, permiso: 'admin' },
     'admin.estado': { fn: adminEstado, permiso: 'admin' },
     'admin.migrar': { fn: adminMigrar, permiso: 'admin', escritura: true },
@@ -1145,30 +1200,82 @@ function doPost(e) {
   try {
     const cuerpo = JSON.parse((e && e.postData && e.postData.contents) || '{}');
     accion = String(cuerpo.accion || '');
-    const resultado = ejecutarAccion(accion, cuerpo.datos || {}, cuerpo.token, cuerpo.id_solicitud);
-    return respuestaJson({ ok: true, datos: resultado, ms: Date.now() - inicio });
+    const r = ejecutarAccion(accion, cuerpo.datos || {}, cuerpo.token, cuerpo.id_solicitud);
+    if (r && r.__sinCambios) return respuestaJson({ ok: true, sin_cambios: true, v: r.v, ms: Date.now() - inicio });
+    return respuestaJson({ ok: true, datos: r.datos, v: r.v, ms: Date.now() - inicio });
   } catch (error) {
     return respuestaJson(respuestaError(error, accion));
   }
 }
 
+/**
+ * Las consultas marcadas con cache: true devuelven "sin cambios" si el navegador ya tiene la versión
+ * vigente de los datos, y se guardan en CacheService para no releer las hojas.
+ */
 function ejecutarAccion(accion, datos, token, idSolicitud) {
   const ruta = rutasApi()[accion];
   if (!ruta) throw new ErrorApp(`Acción no reconocida: ${accion}`, 'ACCION');
   instalarSiFalta(token);
   const usuario = autenticar(token);
   exigirPermiso(usuario, ruta.permiso);
+  const versionCliente = datos._version;
+  delete datos._version;
+
+  if (ruta.cache) {
+    const v = db.version();
+    if (versionCliente && versionCliente === v) return { __sinCambios: true, v };
+    const clave = 'resp_' + hashTexto(db.entorno() + '|' + v + '|' + accion + '|' + JSON.stringify(datos)).substring(0, 48);
+    const guardada = leerCacheGrande(clave);
+    if (guardada !== null) return { datos: guardada, v };
+    const resultado = ruta.fn(datos, usuario);
+    guardarCacheGrande(clave, resultado === undefined ? null : resultado);
+    return { datos: resultado === undefined ? null : resultado, v };
+  }
 
   if (ruta.escritura && idSolicitud) {
     const previa = CacheService.getScriptCache().get('req_' + idSolicitud);
-    if (previa) return JSON.parse(previa);
+    if (previa) return { datos: JSON.parse(previa) };
   }
   const resultado = ruta.fn(datos, usuario);
   if (ruta.escritura && idSolicitud) {
     const texto = JSON.stringify(resultado === undefined ? null : resultado);
     if (texto.length < 90000) CacheService.getScriptCache().put('req_' + idSolicitud, texto, 21600);
   }
-  return resultado === undefined ? null : resultado;
+  return { datos: resultado === undefined ? null : resultado, v: ruta.escritura ? db.version() : undefined };
+}
+
+/** CacheService admite 100 KB por clave: las respuestas grandes se parten en trozos. */
+function guardarCacheGrande(clave, valor) {
+  try {
+    const texto = JSON.stringify(valor);
+    const trozo = 90000;
+    const partes = Math.ceil(texto.length / trozo) || 1;
+    if (partes > 20) return;
+    const mapa = { [clave]: String(partes) };
+    for (let i = 0; i < partes; i++) mapa[clave + '_' + i] = texto.substring(i * trozo, (i + 1) * trozo);
+    CacheService.getScriptCache().putAll(mapa, 1800);
+  } catch (e) {
+    console.warn('No se pudo guardar en caché: ' + e.message);
+  }
+}
+
+function leerCacheGrande(clave) {
+  try {
+    const cache = CacheService.getScriptCache();
+    const partes = Number(cache.get(clave));
+    if (!partes) return null;
+    const claves = [];
+    for (let i = 0; i < partes; i++) claves.push(clave + '_' + i);
+    const valores = cache.getAll(claves);
+    let texto = '';
+    for (let i = 0; i < partes; i++) {
+      if (valores[claves[i]] === undefined || valores[claves[i]] === null) return null;
+      texto += valores[claves[i]];
+    }
+    return JSON.parse(texto);
+  } catch (e) {
+    return null;
+  }
 }
 
 /** Primera entrada: si la base de datos no existe y quien entra es el dueño del script, se instala sola. */
@@ -1213,6 +1320,7 @@ function sesionIniciar(datos, usuario) {
       direccion: usuario.direccion, permisos: permisosDeRol(usuario.rol)
     },
     sistema: { nombre: APP.nombre, version: APP.version, entorno: db.entorno() },
+    solicitudes_pendientes: tienePermiso(usuario, 'admin') ? solicitudesPendientes().length : 0,
     catalogos: {
       categorias: cfg.categorias,
       unidades: cfg.unidades,
@@ -2599,7 +2707,7 @@ function conciliacionHistorial() {
 /**
  * Módulo: Orden de Pago (factura, retenciones, imputación, PDF).
  * Sistema: ERP Alcaldía de Guanipa · Módulo de Órdenes
- * Versión: 1.0.7-beta
+ * Versión: 1.0.8-beta
  * © 2026 Soluciones AFFINITY. Todos los derechos reservados.
  */
 
@@ -2660,6 +2768,98 @@ function calcularOrdenPago(entrada, retencionesConfig, ivaPctBase, montoPagado, 
     monto_pagado: pagado,
     diferencia: tieneFactura ? redondear2(pagado - montoEmpresa) : null
   };
+}
+
+/* ---------- Sugerencia cuando no se tiene el expediente físico ---------- */
+
+/** Retenciones que casi siempre se aplican a una factura: I.V.A (75%), Impuesto Municipal y Timbre Fiscal. */
+const RETENCIONES_FIJAS_OP = ['IVA', 'MUNICIPAL', 'TIMBRE'];
+
+/** Coeficiente neto/base: 1 + IVA − cada retención (expresada sobre la base). Ej.: 1,16 − 0,141 − 0,02 − 0,0348 = 0,9642. */
+function coeficienteNetoOP(codigos, retencionesConfig, ivaPct) {
+  const i = Number(ivaPct) / 100;
+  const porBase = { BASE: 1, IVA: i, TOTAL: 1 + i, NINGUNA: 0 };
+  return retencionesConfig.filter((r) => codigos.indexOf(r.codigo) > -1 && Number(r.porcentaje) > 0)
+    .reduce((c, r) => c - porBase[r.base] * Number(r.porcentaje) / 100, 1 + i);
+}
+
+/**
+ * Propone combinaciones de factura y retenciones que dan exactamente lo pagado.
+ * Basado en la tabla de casos de Tesorería: fijas (0,141) ± I.S.L.R. (0,02) ± Fondo Negro (0,0348, automático
+ * si el total pasa del umbral). Si ninguna cuadra, prueba agregando una retención menos frecuente.
+ */
+function sugerirFacturaOP(pagado, retencionesConfig, ivaPct, umbral, tolerancia) {
+  const existe = (c) => retencionesConfig.some((r) => r.codigo === c && Number(r.porcentaje) > 0);
+  const nombre = (c) => String((retencionesConfig.find((r) => r.codigo === c) || {}).nombre || c).replace(/\s+/g, ' ');
+  const fijas = RETENCIONES_FIJAS_OP.filter(existe);
+  const islr = existe('ISLR') ? ['ISLR'] : [];
+  const extras = retencionesConfig.filter((r) => !r.fila_titulo && Number(r.porcentaje) > 0 &&
+    fijas.concat(islr, [CODIGO_FONDO_NEGRO]).indexOf(r.codigo) === -1).map((r) => r.codigo);
+  const combinaciones = [{ codigos: fijas.concat(islr), prioridad: 1 }, { codigos: fijas, prioridad: 2 }]
+    .concat(extras.map((c) => ({ codigos: fijas.concat(islr, [c]), prioridad: 3 })))
+    .concat(extras.map((c) => ({ codigos: fijas.concat([c]), prioridad: 4 })));
+  const vistas = {};
+  const candidatas = [];
+  combinaciones.forEach((comb) => {
+    [false, true].forEach((conFN) => {
+      const codigos = comb.codigos.concat(conFN ? [CODIGO_FONDO_NEGRO] : []);
+      const coef = coeficienteNetoOP(codigos, retencionesConfig, ivaPct);
+      if (!(coef > 0)) return;
+      const estimada = redondear2(pagado / coef);
+      let mejor = null;
+      for (let paso = 0; paso <= 300; paso++) {
+        const desplazamientos = paso === 0 ? [0] : [paso, -paso];
+        for (let j = 0; j < desplazamientos.length; j++) {
+          const base = redondear2(estimada + desplazamientos[j] / 100);
+          if (!(base > 0)) continue;
+          const k = calcularOrdenPago({ base_imponible: base, retenciones: comb.codigos }, retencionesConfig, ivaPct, pagado, umbral);
+          if (k.fondo_negro_automatico !== conFN) continue;
+          if (!mejor || Math.abs(k.diferencia) < Math.abs(mejor.diferencia)) mejor = k;
+          if (k.diferencia === 0) break;
+        }
+        if (mejor && mejor.diferencia === 0) break;
+      }
+      if (!mejor || Math.abs(mejor.diferencia) > tolerancia) return;
+      const clave = mejor.base_imponible + '|' + codigos.slice().sort().join(',');
+      if (vistas[clave]) return;
+      vistas[clave] = true;
+      const partes = ['Fijas'].concat(comb.codigos.filter((c) => fijas.indexOf(c) === -1).map(nombre), conFN ? ['Fondo Negro (Resp. Social)'] : []);
+      candidatas.push({
+        nombre: partes.join(' + '),
+        coeficiente: Math.round(coef * 10000) / 10000,
+        retenciones: comb.codigos,
+        fondo_negro: conFN,
+        base_imponible: mejor.base_imponible,
+        iva: mejor.iva,
+        total_factura: mejor.total_factura,
+        total_retenciones: mejor.total_retenciones,
+        detalle: mejor.retenciones.filter((f) => f.seleccionada).map((f) => ({ nombre: f.nombre, valor: f.valor_retencion })),
+        monto_empresa: mejor.monto_empresa,
+        diferencia: mejor.diferencia,
+        exacta: mejor.diferencia === 0,
+        prioridad: comb.prioridad
+      });
+    });
+  });
+  const orden = (a, b) => (b.exacta - a.exacta) || (a.prioridad - b.prioridad);
+  // Siempre se muestran los casos comunes de la tabla que cuadran; las combinaciones raras completan hasta 4.
+  const comunes = candidatas.filter((c) => c.prioridad <= 2).sort(orden);
+  const raras = candidatas.filter((c) => c.prioridad > 2).sort(orden).slice(0, Math.max(0, 4 - comunes.length));
+  candidatas.length = 0;
+  Array.prototype.push.apply(candidatas, comunes.concat(raras).sort(orden));
+  return {
+    monto_pagado: redondear2(pagado),
+    fijas: fijas.map(nombre),
+    umbral_fondo_negro: umbral,
+    sugerencias: candidatas.slice(0, 4)
+  };
+}
+
+function opSugerir(datos) {
+  const cfg = config.todo();
+  const pago = db.porId('Pagos', datos.id);
+  if (!pago) throw new ErrorApp('No se encontró el pago.', 'NO_ENCONTRADO');
+  return sugerirFacturaOP(pago.monto, cfg.retenciones, cfg.iva_pct, umbralFondoNegro(), toleranciaCuadreOP());
 }
 
 /** Motivo por el que la orden no puede emitirse con estos datos, o '' si está bien. */
@@ -2788,7 +2988,8 @@ function opGuardar(datos, usuario) {
       op_contrato: textoSeguro(datos.contrato, 60),
       orden_compra_id: ordenId,
       op_imputacion: normalizarImputacionOP(datos.imputacion, pago.fecha),
-      op_borrador_en: pago.op_generada === true ? '' : ahoraISO()
+      op_borrador_en: pago.op_generada === true ? '' : ahoraISO(),
+      op_estimada: conFactura && datos.estimada === true
     };
     const r = db.actualizar('Pagos', pago.id, cambios, usuario.email);
     auditar(usuario, 'ORDEN_PAGO', 'GUARDAR', pago.id, Object.assign({ numero: pago.numero }, diferencias(r.antes, r.despues)));
@@ -3635,6 +3836,11 @@ const VALIDADORES_CONFIG = {
     if (!(n >= 0)) throw new ErrorApp('La tolerancia debe ser un número positivo.', 'VALIDACION');
     return n;
   },
+  correo_solicitudes: (v) => {
+    const correo = String(v || '').trim().toLowerCase();
+    if (correo && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(correo)) throw new ErrorApp('Correo inválido.', 'VALIDACION');
+    return correo;
+  },
   umbral_fondo_negro: (v) => {
     const n = aNumero(v);
     if (!(n > 0)) throw new ErrorApp('El umbral del Fondo Negro Primero debe ser mayor que cero.', 'VALIDACION');
@@ -4282,4 +4488,110 @@ function entornoEliminarApi(datos, usuario) {
 function conciliacionEjemplo() {
   if (db.entorno() !== ENTORNO_PRUEBAS) throw new ErrorApp('El ejemplo solo está disponible en el entorno de pruebas.', 'ENTORNO');
   return { texto: conciliacionFicticia(hoyISO()) };
+}
+
+
+/* ===================== 24_Accesos.gs ===================== */
+/**
+ * Módulo: Solicitudes de acceso. Quien entra por primera vez con una cuenta de Google queda registrado
+ * como solicitud pendiente y se avisa por correo al administrador, que la aprueba (con rol) o la rechaza.
+ * Sistema: ERP Alcaldía de Guanipa · Módulo de Órdenes
+ * Versión: 1.0.8-beta
+ * © 2026 Soluciones AFFINITY. Todos los derechos reservados.
+ */
+
+const URL_WEB = 'https://ambgdtic.github.io/ordenes/';
+const HORAS_ENTRE_AVISOS = 24;
+const ESTADO_SOLICITUD = { PENDIENTE: 'PENDIENTE', APROBADA: 'APROBADA', RECHAZADA: 'RECHAZADA' };
+
+/** Correo que recibe las solicitudes: el configurado o, si no hay, la cuenta dueña del sistema. */
+function correoAdministrador() {
+  const configurado = String(config.obtener('correo_solicitudes') || '').trim();
+  return configurado || String(Session.getEffectiveUser().getEmail() || '');
+}
+
+function solicitudesPendientes() {
+  return db.leer('SolicitudesAcceso').filter((s) => s.estado === ESTADO_SOLICITUD.PENDIENTE);
+}
+
+function horasDesde(iso) {
+  return iso ? (Date.now() - new Date(iso).getTime()) / 36e5 : Infinity;
+}
+
+/** Registra (o actualiza) la solicitud y avisa por correo como máximo una vez cada 24 horas. */
+function registrarSolicitudAcceso(email, nombre) {
+  return db.conBloqueo(() => {
+    const previa = db.primero('SolicitudesAcceso', (s) => s.email === email && s.estado !== ESTADO_SOLICITUD.APROBADA);
+    if (previa && previa.estado === ESTADO_SOLICITUD.RECHAZADA) {
+      return {
+        estado: previa.estado, codigo: 'ACCESO_RECHAZADO',
+        mensaje: `La solicitud de acceso de ${email} fue rechazada${previa.motivo ? ': ' + previa.motivo : ''}. Si cree que es un error, comuníquese con la Dirección de Tecnologías de la Información.`
+      };
+    }
+    let solicitud = previa;
+    if (solicitud) {
+      db.actualizar('SolicitudesAcceso', solicitud.id, { ultimo_intento: ahoraISO(), intentos: (Number(solicitud.intentos) || 0) + 1, nombre: solicitud.nombre || nombre }, 'sistema');
+    } else {
+      solicitud = db.insertar('SolicitudesAcceso', {
+        email, nombre, estado: ESTADO_SOLICITUD.PENDIENTE, solicitado_en: ahoraISO(), ultimo_intento: ahoraISO(), intentos: 1
+      }, 'sistema');
+      auditar({ email }, 'ACCESOS', 'SOLICITAR', solicitud.id, { email, nombre });
+    }
+    if (horasDesde(solicitud.notificado_en) >= HORAS_ENTRE_AVISOS) notificarSolicitud(solicitud, nombre);
+    return {
+      estado: ESTADO_SOLICITUD.PENDIENTE, codigo: 'SOLICITUD_ENVIADA',
+      mensaje: `Su cuenta ${email} todavía no tiene acceso. Se envió la solicitud a la Dirección de Tecnologías de la Información; podrá entrar en cuanto la aprueben.`
+    };
+  });
+}
+
+function notificarSolicitud(solicitud, nombre) {
+  const destino = correoAdministrador();
+  if (!destino) return;
+  const quien = solicitud.nombre || nombre || solicitud.email;
+  const enlace = URL_WEB + '#/admin?tab=usuarios';
+  try {
+    if (MailApp.getRemainingDailyQuota() < 5) throw new Error('Cuota diaria de correo agotada');
+    MailApp.sendEmail({
+      to: destino,
+      subject: `[ERP Guanipa] Solicitud de acceso: ${quien}`,
+      name: 'ERP Alcaldía de Guanipa',
+      htmlBody: `<div style="font-family:Arial,sans-serif;font-size:14px;color:#1f2937">
+        <p><strong>${escaparHtml(quien)}</strong> (${escaparHtml(solicitud.email)}) intentó entrar al sistema de Órdenes y no tiene acceso.</p>
+        <p>Fecha: ${escaparHtml(fechaVE(String(solicitud.solicitado_en).substring(0, 10)))}${db.entorno() === ENTORNO_PRUEBAS ? ' · el sistema está en el entorno de pruebas' : ''}</p>
+        <p><a href="${enlace}" style="background:#1f5f4a;color:#fff;padding:10px 16px;border-radius:6px;text-decoration:none;display:inline-block">Revisar la solicitud</a></p>
+        <p style="color:#6b7280;font-size:12px">Apruébela en Administración › Usuarios eligiendo su rol, o recházela. Recuerde: solo cuentas institucionales por dirección.<br>ERP Alcaldía de Guanipa · © Soluciones AFFINITY</p></div>`,
+      body: `${quien} (${solicitud.email}) solicita acceso al sistema de Órdenes. Revísela en ${enlace}`
+    });
+    db.actualizar('SolicitudesAcceso', solicitud.id, { notificado_en: ahoraISO(), error_notificacion: '' }, 'sistema');
+  } catch (e) {
+    // Sin permiso de correo o sin cuota: la solicitud queda registrada y se ve en Administración.
+    console.error('No se pudo enviar el aviso de solicitud de acceso: ' + e.message);
+    db.actualizar('SolicitudesAcceso', solicitud.id, { error_notificacion: textoSeguro(e.message, 300) }, 'sistema');
+  }
+}
+
+/* ---------- API ---------- */
+
+function adminSolicitudes() {
+  return db.leer('SolicitudesAcceso').map(db.limpiar)
+    .sort((a, b) => (a.estado === b.estado ? (a.solicitado_en < b.solicitado_en ? 1 : -1) : (a.estado === ESTADO_SOLICITUD.PENDIENTE ? -1 : 1)))
+    .slice(0, 100);
+}
+
+function adminResolverSolicitud(datos, usuario) {
+  const s = db.porId('SolicitudesAcceso', datos.id);
+  if (!s) throw new ErrorApp('No se encontró la solicitud.', 'NO_ENCONTRADO');
+  if (s.estado !== ESTADO_SOLICITUD.PENDIENTE) throw new ErrorApp('Esa solicitud ya fue resuelta.', 'ESTADO');
+  if (datos.aprobar) {
+    const creado = adminGuardarUsuario({ email: s.email, nombre: datos.nombre || s.nombre || s.email.split('@')[0], rol: datos.rol, direccion: datos.direccion, activo: true }, usuario);
+    db.actualizar('SolicitudesAcceso', s.id, { estado: ESTADO_SOLICITUD.APROBADA, resuelto_por: usuario.email, resuelto_en: ahoraISO(), rol_asignado: datos.rol }, usuario.email);
+    auditar(usuario, 'ACCESOS', 'APROBAR', s.id, { email: s.email, rol: datos.rol });
+    return { estado: ESTADO_SOLICITUD.APROBADA, usuario: creado };
+  }
+  const motivo = textoSeguro(datos.motivo, 300);
+  if (motivo.length < 5) throw new ErrorApp('Indique el motivo del rechazo (mínimo 5 caracteres).', 'VALIDACION');
+  db.actualizar('SolicitudesAcceso', s.id, { estado: ESTADO_SOLICITUD.RECHAZADA, resuelto_por: usuario.email, resuelto_en: ahoraISO(), motivo }, usuario.email);
+  auditar(usuario, 'ACCESOS', 'RECHAZAR', s.id, { email: s.email, motivo });
+  return { estado: ESTADO_SOLICITUD.RECHAZADA };
 }

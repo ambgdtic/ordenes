@@ -169,6 +169,17 @@ textarea.campo { min-height: 70px; resize: vertical; }
 .sugerencia:hover, .sugerencia:focus-visible { background: #dcefe6; outline: 2px solid #1f5f4a; outline-offset: 1px; }
 .ayuda .enlace { font-size: inherit; }
 
+/* v1.0.8: ventana "Cargando" (bloquea la pantalla mientras el servidor trabaja) */
+.cargando { position: fixed; inset: 0; z-index: 9999; background: rgba(15, 23, 42, .28); display: flex; align-items: center; justify-content: center; cursor: progress; }
+.cargando[hidden] { display: none; }
+.cargando:focus { outline: none; }
+.cargando-caja { background: #fff; border-radius: 12px; padding: 18px 26px; display: flex; align-items: center; gap: 14px; box-shadow: 0 12px 32px rgba(0,0,0,.18); font-weight: 600; color: #1f2937; min-width: 220px; }
+.girador { width: 26px; height: 26px; border-radius: 50%; border: 3px solid #d1e7dd; border-top-color: #1f5f4a; animation: girar .8s linear infinite; flex: none; }
+@keyframes girar { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .girador { animation-duration: 2.4s; } }
+.sugerencia-op { border: 1px solid #d1d5db; border-radius: 10px; padding: 12px 14px; }
+.sugerencia-op.exacta { border-color: #1f5f4a; background: #f3faf6; }
+
 </style>
 </head>
 <body class="min-h-screen">
@@ -186,7 +197,7 @@ window.CONFIG = { API_URL: 'https://script.google.com/macros/s/AKfycbxigx2eZgRXu
 /**
  * Módulo: Núcleo de la interfaz (sesión, API, enrutador, componentes).
  * Sistema: ERP Alcaldía de Guanipa · Módulo de Órdenes
- * Versión: 1.0.7-beta
+ * Versión: 1.0.8-beta
  * © 2026 Soluciones AFFINITY. Todos los derechos reservados.
  */
 'use strict';
@@ -233,7 +244,7 @@ function esc(s) {
 const ICONOS_RESPALDO = {
   pencil: '✎', 'pencil-line': '✎', printer: '⎙', ban: '⊘', eye: '👁', 'file-signature': '✍', 'clipboard-list': '☰', 'rotate-ccw': '↺',
   x: '✕', plus: '+', save: '✓', 'file-check': '✓', 'refresh-cw': '⟳', 'chevron-left': '‹', 'chevron-right': '›', menu: '☰',
-  'sun-moon': '◐', 'log-out': '⏻', 'trash-2': '🗑', 'user-plus': '+', 'file-up': '⇪', 'cloud-upload': '⇪', 'file-text': '📄', check: '✓', 'cloud-download': '⇩', history: '⟲', 'flask-conical': '⚗', 'triangle-alert': '⚠', 'chart-column': '▥'
+  'sun-moon': '◐', 'log-out': '⏻', 'trash-2': '🗑', 'user-plus': '+', 'file-up': '⇪', 'cloud-upload': '⇪', 'file-text': '📄', check: '✓', 'cloud-download': '⇩', history: '⟲', 'flask-conical': '⚗', 'folder-search': '⌕', 'user-check': '✓', 'user-x': '✕', 'triangle-alert': '⚠', 'chart-column': '▥'
 };
 function ico(nombre, clases = '') { return `<i data-lucide="${nombre}" data-alt="${ICONOS_RESPALDO[nombre] || ''}" class="${clases}" aria-hidden="true"></i>`; }
 function $(sel, raiz = document) { return raiz.querySelector(sel); }
@@ -430,7 +441,7 @@ const ui = {
       if (texto.length === 1) { cerrar(); return; }
       const n = ++consulta;
       try {
-        const r = await api('beneficiarios.buscar', { texto });
+        const r = await api('beneficiarios.buscar', { texto }, { silencioso: true });
         if (n !== consulta || document.activeElement !== input && !(lista && lista.contains(document.activeElement))) return;
         cerrar();
         lista = document.createElement('div');
@@ -527,7 +538,102 @@ class ErrorApi extends Error {
   constructor(mensaje, codigo, detalle) { super(mensaje); this.codigo = codigo; this.detalle = detalle; }
 }
 
+/* ---------- Ventana "Cargando": bloquea la pantalla mientras el servidor trabaja ---------- */
+const Cargando = (() => {
+  let pendientes = 0;
+  let temporizador = null;
+  let el = null;
+  let previo = null;
+  const bloquearTeclas = (e) => { if (el && !el.hidden && e.key !== 'Tab') { e.preventDefault(); e.stopPropagation(); } };
+  function crear() {
+    el = document.createElement('div');
+    el.className = 'cargando';
+    el.setAttribute('role', 'alertdialog');
+    el.setAttribute('aria-modal', 'true');
+    el.setAttribute('aria-live', 'assertive');
+    el.tabIndex = -1;
+    el.innerHTML = '<div class="cargando-caja"><span class="girador" aria-hidden="true"></span><span class="cargando-texto"></span></div>';
+    el.hidden = true;
+    document.body.appendChild(el);
+    document.addEventListener('keydown', bloquearTeclas, true);
+  }
+  function mostrar(texto) {
+    if (!el) crear();
+    el.querySelector('.cargando-texto').textContent = texto;
+    el.hidden = false;
+    document.body.setAttribute('aria-busy', 'true');
+    previo = document.activeElement;
+    el.focus();
+  }
+  return {
+    iniciar(texto) {
+      pendientes++;
+      if (el && !el.hidden) { el.querySelector('.cargando-texto').textContent = texto; return; }
+      clearTimeout(temporizador);
+      // Solo aparece si tarda: las respuestas que salen de la caché no parpadean.
+      temporizador = setTimeout(() => mostrar(texto), 250);
+    },
+    texto(t) { if (el && !el.hidden) el.querySelector('.cargando-texto').textContent = t; },
+    terminar() {
+      pendientes = Math.max(0, pendientes - 1);
+      if (pendientes) return;
+      clearTimeout(temporizador);
+      if (el && !el.hidden) {
+        el.hidden = true;
+        if (previo && previo.isConnected && previo.focus) previo.focus();
+      }
+      document.body.removeAttribute('aria-busy');
+    }
+  };
+})();
+
+/* ---------- Caché de consultas: se reutiliza mientras los datos del servidor no cambien ---------- */
+const CacheApi = (() => {
+  const RUTAS = ['panel.resumen', 'pagos.listar', 'pagos.obtener', 'conciliacion.historial', 'oc.listar', 'oc.obtener',
+    'beneficiarios.listar', 'beneficiarios.detalle', 'tasas.listar', 'op.vista', 'oc.vista'];
+  const FRESCO_MS = 30000;
+  const MAXIMO = 80;
+  const datos = new Map();
+  const copia = (v) => (v === undefined ? v : JSON.parse(JSON.stringify(v)));
+  return {
+    aplica: (accion) => RUTAS.includes(accion),
+    clave: (accion, d) => accion + '|' + JSON.stringify(d || {}),
+    leer: (clave) => datos.get(clave) || null,
+    fresca: (e) => e && Date.now() - e.cuando < FRESCO_MS,
+    copia,
+    guardar(clave, v, valor) {
+      datos.delete(clave);
+      datos.set(clave, { v, valor: copia(valor), cuando: Date.now() });
+      if (datos.size > MAXIMO) datos.delete(datos.keys().next().value);
+    },
+    tocar(e) { e.cuando = Date.now(); },
+    vaciar: () => datos.clear()
+  };
+})();
+
+/**
+ * Llamada a la API. Opciones: escritura (reintentos idempotentes), silencioso (sin ventana "Cargando"),
+ * mensaje (texto de la ventana) y sinCache.
+ */
 async function api(accion, datos = {}, opciones = {}) {
+  const usarCache = !opciones.escritura && !opciones.sinCache && CacheApi.aplica(accion);
+  const clave = usarCache ? CacheApi.clave(accion, datos) : '';
+  const previa = usarCache ? CacheApi.leer(clave) : null;
+  if (previa && CacheApi.fresca(previa)) return CacheApi.copia(previa.valor);
+  const silencioso = opciones.silencioso === true;
+  if (!silencioso) Cargando.iniciar(opciones.mensaje || (opciones.escritura ? 'Guardando…' : 'Cargando…'));
+  try {
+    const r = await llamarApi(accion, previa ? Object.assign({}, datos, { _version: previa.v }) : datos, opciones);
+    if (opciones.escritura) CacheApi.vaciar();
+    if (r.sin_cambios && previa) { CacheApi.tocar(previa); return CacheApi.copia(previa.valor); }
+    if (usarCache && r.v) CacheApi.guardar(clave, r.v, r.datos);
+    return r.datos;
+  } finally {
+    if (!silencioso) Cargando.terminar();
+  }
+}
+
+async function llamarApi(accion, datos, opciones) {
   const idSolicitud = opciones.escritura ? idUnico() : undefined;
   const intentos = opciones.escritura ? 4 : 3;
   let ultimoError;
@@ -544,7 +650,7 @@ async function api(accion, datos = {}, opciones = {}) {
       let cuerpo;
       try { cuerpo = JSON.parse(texto); } catch (e) { throw new ErrorApi('El servidor respondió algo inesperado. Intente de nuevo.', 'RESPUESTA'); }
       avisoRed(false);
-      if (cuerpo.ok) return cuerpo.datos;
+      if (cuerpo.ok) return cuerpo;
       if (['TOKEN_INVALIDO', 'SIN_SESION'].includes(cuerpo.codigo)) {
         await Sesion.renovar();
         continue;
@@ -555,6 +661,7 @@ async function api(accion, datos = {}, opciones = {}) {
       if (e instanceof ErrorApi) throw e;
       ultimoError = e;
       avisoRed(true, 'Problema de conexión. Reintentando…');
+      Cargando.texto('Problema de conexión. Reintentando…');
       await new Promise((ok) => setTimeout(ok, [1500, 3500, 7000, 12000][i]));
     }
   }
@@ -629,7 +736,8 @@ const Sesion = (() => {
       });
       iniciarGis(() => { m.cerrar(); esperando = null; ok(); }).then(() => {
         google.accounts.id.renderButton($('#gis-renovar', m.el), { theme: 'outline', size: 'large', text: 'continue_with', locale: 'es' });
-        google.accounts.id.prompt();
+        // Tras un rechazo o una solicitud pendiente no se reintenta solo (evita un ciclo de entradas).
+      if (!codigo) google.accounts.id.prompt();
       }).catch(ui.error);
     });
     return esperando;
@@ -671,13 +779,16 @@ const App = (() => {
     pantallaLogin();
   }
 
-  function pantallaLogin(mensaje) {
+  function pantallaLogin(mensaje, codigo) {
+    const solicitud = codigo === 'SOLICITUD_ENVIADA';
+    const tipo = solicitud ? 'alerta-info' : 'alerta-peligro';
     $('#app').innerHTML = `<main class="min-h-screen flex items-center justify-center p-4">
       <div class="tarjeta w-full max-w-sm p-7 text-center">
         <img src="data:image/jpeg;base64,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" alt="Alcaldía del Municipio Guanipa" class="h-20 mx-auto mb-4 rounded">
         <h1 class="text-lg font-semibold">Órdenes de Pago, Compra y Servicio</h1>
         <p class="suave text-sm mb-5">Alcaldía del Municipio Guanipa</p>
-        ${mensaje ? `<div class="alerta alerta-peligro text-left mb-4">${esc(mensaje)}</div>` : ''}
+        ${mensaje ? `<div class="alerta ${tipo} text-left mb-4">${solicitud ? '<strong>Solicitud enviada.</strong><br>' : ''}${esc(mensaje)}</div>` : ''}
+        ${solicitud ? '<p class="suave text-xs mb-3">Cuando se la aprueben, vuelva a esta página y entre de nuevo.</p>' : ''}
         <div id="gis-boton" class="flex justify-center min-h-[44px]"></div>
         <p class="suave text-xs mt-5">Acceso solo para cuentas institucionales autorizadas por la Dirección de TI.</p>
       </div></main>`;
@@ -703,13 +814,14 @@ const App = (() => {
       estado.catalogos = s.catalogos;
       estado.sistema = s.sistema;
       estado.tasaHoy = s.tasa_hoy;
+      estado.solicitudesPendientes = s.solicitudes_pendientes || 0;
       armarEstructura();
       if (!escuchando) { window.addEventListener('hashchange', navegar); escuchando = true; }
       navegar();
     } catch (e) {
       try { sessionStorage.removeItem('gtoken'); } catch (x) { /* sin almacenamiento */ }
       if (window.CONFIG.TOKEN_PRUEBA) { $('#app').innerHTML = `<p class="p-6">${esc(e.message)}</p>`; return; }
-      pantallaLogin(e.message);
+      pantallaLogin(e.message, e.codigo);
     }
   }
 
@@ -836,6 +948,7 @@ App.registrar({
         <div class="kpi-valor mt-1">${valor}</div><div class="suave text-xs mt-1">${extra || '&nbsp;'}</div>
       </${enlace ? 'a' : 'div'}>`;
     const avisos = [];
+    if (App.puede('admin') && App.estado.solicitudesPendientes) avisos.push(`<a href="#/admin?tab=usuarios">${App.estado.solicitudesPendientes} solicitud(es) de acceso</a> esperando su aprobación.`);
     if (k.op_borradores) avisos.push(`<a href="#/pagos?op=BORRADOR&anio=${anio}&mes=${mes}">${k.op_borradores} orden(es) con borrador guardado</a> en curso: revíselas y genérelas.`);
     if (k.por_completar) avisos.push(`<a href="#/pagos?estado_datos=POR_COMPLETAR&anio=${anio}&mes=${mes}">${k.por_completar} pago(s) por completar</a> antes de poder emitir su Orden de Pago.`);
     if (k.sin_tasa) avisos.push(`${k.sin_tasa} pago(s) sin tasa BCV. <a href="#/tasas">Revise las tasas</a>.`);
@@ -900,7 +1013,7 @@ App.registrar({
 ;
 /**
  * Módulo: Pagos realizados y Órdenes de Pago.
- * Sistema: ERP Alcaldía de Guanipa · Módulo de Órdenes · v1.0.7-beta
+ * Sistema: ERP Alcaldía de Guanipa · Módulo de Órdenes · v1.0.8-beta
  * © 2026 Soluciones AFFINITY.
  */
 'use strict';
@@ -929,32 +1042,6 @@ const Pagos = (() => {
       restanteIva: base > 0 ? (filaIva && filaIva.seleccionada ? r2(iva - filaIva.valor_retencion) : 0) : null,
       diferencia: base > 0 ? r2(pagado - empresa) : null
     };
-  }
-
-  /**
-   * Base imponible que hace que el neto sea igual a lo pagado. Cada retención es proporcional a la base,
-   * así que se despeja y luego se ajusta al céntimo. Devuelve null si no hay una base exacta.
-   */
-  function baseDesdePagado(pagado, elegidas, retenciones, ivaPct, umbralFN, tolerancia) {
-    const coef = (conFN) => {
-      const i = Number(ivaPct) / 100;
-      const porBase = { BASE: 1, IVA: i, TOTAL: 1 + i, NINGUNA: 0 };
-      const ret = retenciones.filter((r) => Number(r.porcentaje) > 0 && (elegidas.includes(r.codigo) || (conFN && r.codigo === 'FONDO_NEGRO')) && (conFN || r.codigo !== 'FONDO_NEGRO'))
-        .reduce((s, r) => s + porBase[r.base] * r.porcentaje / 100, 0);
-      return 1 + i - ret;
-    };
-    let mejor = null;
-    [false, true].forEach((conFN) => {
-      const estimada = r2(pagado / coef(conFN));
-      for (let d = -300; d <= 300; d++) {
-        const b = r2(estimada + d / 100);
-        const k = calcularOP({ base_imponible: b, retenciones: elegidas }, retenciones, ivaPct, pagado, umbralFN);
-        if (k.fondoNegro !== conFN) continue;
-        if (!mejor || Math.abs(k.diferencia) < Math.abs(mejor.diferencia)) mejor = { base: b, diferencia: k.diferencia };
-        if (k.diferencia === 0) return;
-      }
-    });
-    return mejor && Math.abs(mejor.diferencia) <= tolerancia ? mejor : null;
   }
 
   function estadoPill(p) {
@@ -1141,7 +1228,7 @@ const Pagos = (() => {
       const doc = $('#p-doc', el).value.replace(/\D/g, '');
       if (doc.length < 5 || $('#p-ben', el).value.trim()) return;
       try {
-        const r = await api('beneficiarios.buscar', { texto: doc });
+        const r = await api('beneficiarios.buscar', { texto: doc }, { silencioso: true });
         const t = $('#p-tipo', el).value;
         const candidatos = r.filter((b) => !t || b.tipo_doc === t);
         if (candidatos.length === 1) { usarBeneficiario(candidatos[0]); ui.toast(`Datos de ${candidatos[0].nombre} cargados del registro.`, 'info'); }
@@ -1204,7 +1291,8 @@ const Pagos = (() => {
       con_factura: conFacturaInicial(p, cat),
       factura: p.op_factura || '', base_imponible: p.op_base_imponible ? fmt.num(p.op_base_imponible) : '',
       retenciones: (p.op_retenciones || []).filter((c) => c !== 'FONDO_NEGRO'), contrato: p.op_contrato || '', orden_compra_id: p.orden_compra_id || '',
-      imputacion: p.op_imputacion || { fecha: '', lineas: [] }
+      imputacion: p.op_imputacion || { fecha: '', lineas: [] },
+      estimada: p.op_estimada === true
     };
     if (inicial.con_factura === undefined) inicial.con_factura = conFacturaInicial(p, cat);
     let ordenes = [];
@@ -1228,10 +1316,15 @@ const Pagos = (() => {
                 <span><strong>Este pago tiene factura</strong> (empresa o firma personal)</span></label>
               <p class="suave text-xs mb-3">Desmarque para pagos a particulares, ayudas, subvenciones, dozavos, créditos adicionales o nómina: no llevan factura, IVA ni retenciones.</p>
               <div id="op-bloque-factura" class="space-y-4">
+                <div class="flex flex-wrap items-center gap-2">
+                  <button type="button" class="btn btn-chico" id="op-sugerir">${ico('folder-search')} No tengo el expediente</button>
+                  <span class="suave text-xs">Propone la factura y las retenciones que dan exactamente lo pagado.</span>
+                </div>
+                <label class="check alerta alerta-aviso" id="op-estimada-l" ${inicial.estimada ? '' : 'hidden'}><input type="checkbox" id="op-estimada" ${inicial.estimada ? 'checked' : ''}>
+                  <span><strong>Datos estimados sin expediente físico.</strong> Desmárquelo cuando los verifique con la factura.</span></label>
                 <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
                   <div><label class="etiqueta" for="op-fac">N° de factura</label><input id="op-fac" class="campo" maxlength="40" value="${esc(inicial.factura)}"></div>
-                  <div><label class="etiqueta" for="op-base">Base imponible (Bs.)</label><input id="op-base" class="campo num" inputmode="decimal" value="${esc(inicial.base_imponible)}">
-                    <button type="button" class="enlace text-xs mt-1" id="op-calc-base">Calcular base desde lo pagado</button></div>
+                  <div><label class="etiqueta" for="op-base">Base imponible (Bs.)</label><input id="op-base" class="campo num" inputmode="decimal" value="${esc(inicial.base_imponible)}"></div>
                   <div><label class="etiqueta" for="op-iva">IVA</label><input id="op-iva" class="campo" readonly value="${fmt.num(cat.iva_pct, 0)}%"></div>
                 </div>
                 <div>
@@ -1269,7 +1362,7 @@ const Pagos = (() => {
     const el = m.el;
     const conFactura = () => $('#op-confac', el).checked;
     const leer = () => ({
-      id, con_factura: conFactura(),
+      id, con_factura: conFactura(), estimada: conFactura() && $('#op-estimada', el).checked,
       factura: conFactura() ? $('#op-fac', el).value.trim() : '',
       base_imponible: conFactura() ? fmt.aNumero($('#op-base', el).value) : null,
       retenciones: conFactura() ? $$('#op-rets input[type=checkbox]:checked', el).map((c) => c.value) : [],
@@ -1323,14 +1416,15 @@ const Pagos = (() => {
     };
     $('#form-op', el).addEventListener('input', demorar(pintar, 150));
     $('#form-op', el).addEventListener('change', pintar);
-    $('#op-calc-base', el).addEventListener('click', () => {
-      const elegidas = $$('#op-rets input[type=checkbox]:checked', el).map((c) => c.value);
-      const r = baseDesdePagado(p.monto, elegidas, cat.retenciones, cat.iva_pct, umbral, tol);
-      if (!r) { ui.toast('Con esas retenciones no hay una base que dé exactamente lo pagado. Revise las retenciones marcadas.', 'aviso', 7000); return; }
-      $('#op-base', el).value = fmt.num(r.base);
+    $('#op-sugerir', el).addEventListener('click', () => sugerirSinExpediente(id, p, (g) => {
+      $('#op-confac', el).checked = true;
+      $('#op-base', el).value = fmt.num(g.base_imponible);
+      $$('#op-rets input[type=checkbox]', el).forEach((c) => { c.checked = g.retenciones.includes(c.value); });
+      $('#op-estimada-l', el).hidden = false;
+      $('#op-estimada', el).checked = true;
       pintar();
-      ui.toast(`Base calculada: ${fmt.bs(r.base)} Compárela con la factura física antes de generar.`, 'info', 7000);
-    });
+      ui.toast('Datos estimados cargados: el neto cuadra con lo pagado. Confírmelos con el expediente cuando lo tenga.', 'info', 8000);
+    }));
     pintar();
     const guardar = async (ev, generar) => {
       const btn = ev.currentTarget;
@@ -1350,6 +1444,33 @@ const Pagos = (() => {
     };
     $('#op-guardar', el).addEventListener('click', (ev) => guardar(ev, false));
     $('#op-pdf', el).addEventListener('click', (ev) => guardar(ev, true));
+  }
+
+  /** Combinaciones de factura y retenciones que dan exactamente lo pagado (cuando no se tiene el expediente). */
+  async function sugerirSinExpediente(id, p, alElegir) {
+    let r;
+    try { r = await api('op.sugerir', { id }, { mensaje: 'Buscando combinaciones que cuadren…' }); } catch (e) { ui.error(e); return; }
+    const celda = (t, v) => `<div><div class="suave text-xs">${t}</div><div class="font-semibold num">${v}</div></div>`;
+    const m = ui.modal({
+      titulo: 'Sugerencias sin expediente',
+      tamano: 'mediano',
+      cuerpo: `
+        <p class="text-sm mb-3">Con lo pagado (<strong>${fmt.bs(r.monto_pagado)}</strong>) se buscó qué factura y retenciones dan <strong>exactamente</strong> ese neto.
+          Retenciones fijas: ${esc(r.fijas.join(', '))}. El Fondo Negro Primero (Resp. Social) se aplica solo si el total pasa de ${fmt.bs(r.umbral_fondo_negro)}.</p>
+        <div class="alerta alerta-aviso text-sm mb-3">Es una estimación: puede haber más de una combinación posible. Elija la que corresponda al tipo de proveedor y verifíquela con el expediente cuando lo tenga.</div>
+        ${r.sugerencias.length ? `<div class="space-y-3">${r.sugerencias.map((g, i) => `<div class="sugerencia-op ${g.exacta ? 'exacta' : ''}">
+            <div class="flex flex-wrap items-center gap-2 mb-1"><strong class="mr-auto">${i + 1}. ${esc(g.nombre)}</strong>
+              ${g.exacta ? '<span class="pill pill-ok">Cuadra exacto</span>' : `<span class="pill pill-aviso">Diferencia ${fmt.bs(g.diferencia)}</span>`}
+              ${g.prioridad > 2 ? '<span class="pill pill-neutro">Menos común</span>' : ''}</div>
+            <p class="suave text-xs mb-2">Pagado ÷ ${fmt.num(g.coeficiente, 4)} = base imponible</p>
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-2">${celda('Base imponible', fmt.bs(g.base_imponible))}${celda('IVA', fmt.bs(g.iva))}${celda('Total factura', fmt.bs(g.total_factura))}${celda('Retenciones', fmt.bs(g.total_retenciones))}</div>
+            <p class="text-xs mb-2">${g.detalle.map((d) => `${esc(d.nombre)}: ${fmt.bs(d.valor)}`).join(' · ')}</p>
+            <button type="button" class="btn btn-prim btn-chico" data-usar="${i}">Usar esta</button></div>`).join('')}</div>`
+          : '<div class="alerta alerta-peligro">No se encontró ninguna combinación que dé exactamente lo pagado. Probablemente el pago no lleva factura, o se aplicaron retenciones distintas: revise el expediente.</div>'}`,
+      pie: '<button class="btn" data-cerrar>Cerrar</button>'
+    });
+    $$('[data-usar]', m.el).forEach((b) => b.addEventListener('click', () => { const g = r.sugerencias[Number(b.dataset.usar)]; m.cerrar(); alElegir(g); }));
+    ui.iconos();
   }
 
   async function verOrden(id, recargar) {
@@ -1452,7 +1573,7 @@ const Importar = (() => {
 
   async function cargarHistorial() {
     try {
-      const h = await api('conciliacion.historial');
+      const h = await api('conciliacion.historial', {}, { silencioso: true });
       $('#historial').innerHTML = h.length ? `<table class="tabla"><thead><tr><th>Fecha</th><th>Archivo</th><th>Período</th><th class="num">Importados</th><th class="num">Monto</th><th>Por</th></tr></thead><tbody>
         ${h.map((i) => `<tr><td>${fmt.fechaHora(i.creado_en)}</td><td>${i.archivo_url ? `<a href="${esc(i.archivo_url)}" target="_blank" rel="noopener">${esc(i.archivo_nombre)}</a>` : esc(i.archivo_nombre)}</td>
           <td>${fmt.fecha(i.rango_desde)} – ${fmt.fecha(i.rango_hasta)}</td><td class="num">${i.filas_importadas}</td><td class="num">${fmt.bs(i.monto_total)}</td><td class="text-xs">${esc(i.creado_por)}</td></tr>`).join('')}</tbody></table>`
@@ -2249,7 +2370,7 @@ App.registrar({ id: 'tasas', titulo: 'Tasa BCV', icono: 'trending-up', permiso: 
 ;
 /**
  * Módulo: Administración (estado, configuración, usuarios, auditoría y migración).
- * Sistema: ERP Alcaldía de Guanipa · Módulo de Órdenes · v1.0.7-beta
+ * Sistema: ERP Alcaldía de Guanipa · Módulo de Órdenes · v1.0.8-beta
  * © 2026 Soluciones AFFINITY.
  */
 'use strict';
@@ -2395,6 +2516,7 @@ const Admin = (() => {
       ${seccion('institucion', 'Datos del membrete', `<div class="grid grid-cols-1 sm:grid-cols-2 gap-3">${['pais', 'estado', 'nombre', 'rif', 'ciudad', 'lugar_compra', 'pie', 'telefono'].map((k) => campo(`inst-${k}`, k.replace('_', ' '), inst[k])).join('')}</div>`)}
       ${seccion('beneficiario_nomina', 'Nombre para movimientos de nómina', campo('nomina', 'Beneficiario', valor('beneficiario_nomina')))}
       ${seccion('tolerancia_diferencia', 'Tolerancia de diferencia en la OP', `<div class="w-40">${campo('tol', 'Bs.', valor('tolerancia_diferencia'), 'inputmode="decimal"')}</div>`, 'Diferencia máxima entre lo pagado y el neto calculado. Si la supera, la orden solo puede guardarse como borrador.')}
+      ${seccion('correo_solicitudes', 'Correo para solicitudes de acceso', `<div class="max-w-sm">${campo('correo-sol', 'Correo', valor('correo_solicitudes') || '', 'type="email" placeholder="Vacío: la cuenta dueña del sistema"')}</div>`, 'Recibe un aviso cuando alguien sin acceso intenta entrar (máximo uno por persona cada 24 horas).')}
       ${seccion('umbral_fondo_negro', 'Fondo Negro Primero', `<div class="w-48">${campo('umbral-fn', 'Total de factura mayor a (Bs.)', valor('umbral_fondo_negro') || 100000, 'inputmode="decimal"')}</div>`, 'Se aplica automáticamente (3% del total) cuando el total de la factura supera este monto.')}
       </div>`;
     let nCats = valor('categorias').length;
@@ -2414,6 +2536,7 @@ const Admin = (() => {
       institucion: () => { const o = {}; ['pais', 'estado', 'nombre', 'rif', 'ciudad', 'lugar_compra', 'pie', 'telefono'].forEach((k) => { o[k] = $(`#inst-${k}`).value; }); return o; },
       beneficiario_nomina: () => $('#nomina').value,
       tolerancia_diferencia: () => fmt.aNumero($('#tol').value),
+      correo_solicitudes: () => $('#correo-sol').value.trim(),
       umbral_fondo_negro: () => fmt.aNumero($('#umbral-fn').value)
     };
     $$('form[data-clave]', panel).forEach((f) => f.addEventListener('submit', async (ev) => {
@@ -2429,8 +2552,28 @@ const Admin = (() => {
 
   /* ---------- Usuarios ---------- */
   async function usuarios(panel) {
-    const lista = await api('admin.usuarios');
-    panel.innerHTML = `<div class="flex mb-3"><p class="suave text-sm mr-auto">Solo las cuentas registradas aquí pueden entrar. Los usuarios no se borran: se desactivan.</p>
+    const [lista, solicitudes] = await Promise.all([api('admin.usuarios'), api('admin.solicitudes')]);
+    const pendientes = solicitudes.filter((x) => x.estado === 'PENDIENTE');
+    const resueltas = solicitudes.filter((x) => x.estado !== 'PENDIENTE').slice(0, 10);
+    panel.innerHTML = `
+      <div class="tarjeta p-4 mb-3">
+        <h2 class="font-semibold mb-1">Solicitudes de acceso ${pendientes.length ? `<span class="pill pill-aviso">${pendientes.length} pendiente(s)</span>` : ''}</h2>
+        <p class="suave text-xs mb-3">Quien entra por primera vez queda aquí y se avisa por correo (a la cuenta indicada en Configuración; por defecto, la dueña del sistema). Recuerde: cuentas institucionales por dirección.</p>
+        ${pendientes.length ? `<div class="space-y-3">${pendientes.map((x) => `<div class="sugerencia-op" data-sol="${x.id}">
+            <div class="flex flex-wrap items-center gap-2 mb-2"><strong class="mr-auto">${esc(x.nombre || x.email)}</strong><span class="suave text-xs">${esc(x.email)} · ${fmt.fechaHora(x.solicitado_en)} · ${x.intentos} intento(s)</span></div>
+            ${x.error_notificacion ? `<p class="text-xs mb-2" style="color:var(--aviso)">El correo de aviso no se pudo enviar: ${esc(x.error_notificacion)}</p>` : ''}
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-2 items-end">
+              <div><label class="etiqueta" for="s-nom-${x.id}">Nombre</label><input id="s-nom-${x.id}" class="campo" value="${esc(x.nombre || '')}"></div>
+              <div><label class="etiqueta" for="s-rol-${x.id}">Rol</label><select id="s-rol-${x.id}" class="campo">${ui.opciones(Object.keys(ROLES).map((k) => ({ valor: k, texto: ROLES[k] })), 'CONSULTA')}</select></div>
+              <div><label class="etiqueta" for="s-dir-${x.id}">Dirección</label><input id="s-dir-${x.id}" class="campo" list="dirs-sol"></div>
+            </div>
+            <div class="flex flex-wrap gap-2 mt-2"><button class="btn btn-prim btn-chico" data-aprobar="${x.id}">${ico('user-check')} Aprobar</button>
+              <button class="btn btn-chico" data-rechazar="${x.id}">${ico('user-x')} Rechazar</button></div></div>`).join('')}
+            <datalist id="dirs-sol">${App.estado.catalogos.unidades.map((u) => `<option value="${esc(u)}">`).join('')}</datalist></div>`
+          : '<p class="suave text-sm">No hay solicitudes pendientes.</p>'}
+        ${resueltas.length ? `<details class="mt-3"><summary class="text-sm cursor-pointer">Últimas resueltas</summary><ul class="text-xs mt-2 space-y-1">${resueltas.map((x) => `<li>${esc(x.email)} · ${x.estado === 'APROBADA' ? `aprobada (${esc(ROLES[x.rol_asignado] || x.rol_asignado)})` : `rechazada: ${esc(x.motivo)}`} · ${fmt.fechaHora(x.resuelto_en)}</li>`).join('')}</ul></details>` : ''}
+      </div>
+      <div class="flex mb-3"><p class="suave text-sm mr-auto">Solo las cuentas registradas aquí pueden entrar. Los usuarios no se borran: se desactivan.</p>
       <button class="btn btn-prim" id="u-nuevo">${ico('user-plus')} Nuevo usuario</button></div>
       <div class="tarjeta tabla-env"><table class="tabla"><thead><tr><th>Nombre</th><th>Correo</th><th>Rol</th><th>Dirección</th><th>Último acceso</th><th>Estado</th><th></th></tr></thead><tbody>
       ${lista.map((u) => `<tr><td class="font-medium">${esc(u.nombre)}</td><td>${esc(u.email)}</td><td>${esc(u.rol_nombre)}</td><td class="text-xs">${esc(u.direccion)}</td>
@@ -2463,6 +2606,29 @@ const Admin = (() => {
       });
     };
     $('#u-nuevo').addEventListener('click', () => abrir({}));
+    $$('[data-aprobar]', panel).forEach((b) => b.addEventListener('click', async () => {
+      const id = b.dataset.aprobar;
+      const sol = pendientes.find((x) => x.id === id);
+      const rol = $(`#s-rol-${id}`, panel).value;
+      const ok = await ui.confirmar({ titulo: 'Aprobar acceso', mensaje: `${esc(sol.email)} podrá entrar con el rol <strong>${esc(ROLES[rol])}</strong>.`, textoBoton: 'Aprobar' });
+      if (!ok) return;
+      try {
+        await api('admin.resolverSolicitud', { id, aprobar: true, rol, nombre: $(`#s-nom-${id}`, panel).value, direccion: $(`#s-dir-${id}`, panel).value }, { escritura: true });
+        ui.toast(`Acceso aprobado para ${sol.email}. Ya puede entrar.`, 'exito');
+        App.navegar();
+      } catch (e) { ui.error(e); }
+    }));
+    $$('[data-rechazar]', panel).forEach((b) => b.addEventListener('click', async () => {
+      const id = b.dataset.rechazar;
+      const sol = pendientes.find((x) => x.id === id);
+      const motivo = await ui.confirmar({ titulo: 'Rechazar acceso', mensaje: `${esc(sol.email)} no podrá entrar. La persona verá el motivo.`, textoBoton: 'Rechazar', peligro: true, pedirMotivo: true });
+      if (!motivo) return;
+      try {
+        await api('admin.resolverSolicitud', { id, aprobar: false, motivo }, { escritura: true });
+        ui.toast('Solicitud rechazada.', 'exito');
+        App.navegar();
+      } catch (e) { ui.error(e); }
+    }));
     $$('[data-id]', panel).forEach((b) => b.addEventListener('click', () => abrir(lista.find((u) => u.id === b.dataset.id))));
   }
 

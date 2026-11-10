@@ -14,6 +14,9 @@ const APP = {
   nombreCarpetaRaiz: 'ERP Guanipa - Documentos'
 };
 
+// ID de cliente OAuth (público). La propiedad del script GOOGLE_CLIENT_ID, si existe, tiene prioridad.
+const GOOGLE_CLIENT_ID_PREDETERMINADO = '3906052684-d0ed8n08oecuqdcfoaj25s46523fa1d6.apps.googleusercontent.com';
+
 const MESES = ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio',
   'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'];
 
@@ -763,7 +766,7 @@ function verificarTokenGoogle(token) {
   const enCache = cache.get(claveCache);
   if (enCache) return enCache;
 
-  const clienteId = propiedad('GOOGLE_CLIENT_ID');
+  const clienteId = propiedad('GOOGLE_CLIENT_ID') || GOOGLE_CLIENT_ID_PREDETERMINADO;
   if (!clienteId) throw new ErrorApp('Falta configurar GOOGLE_CLIENT_ID en las propiedades del script.', 'CONFIGURACION');
 
   const respuesta = UrlFetchApp.fetch('https://oauth2.googleapis.com/tokeninfo?id_token=' + encodeURIComponent(token),
@@ -3160,7 +3163,7 @@ function adminEstado() {
     version: APP.version,
     base_datos_url: `https://docs.google.com/spreadsheets/d/${db.idLibro()}/edit`,
     carpeta_url: `https://drive.google.com/drive/folders/${carpetaRaiz().getId()}`,
-    client_id_configurado: !!props.getProperty('GOOGLE_CLIENT_ID'),
+    client_id_configurado: !!(props.getProperty('GOOGLE_CLIENT_ID') || GOOGLE_CLIENT_ID_PREDETERMINADO),
     disparadores: triggers,
     ultima_sincronizacion_tasa: leer('TASA_ULTIMA_SYNC'),
     ultimo_respaldo: leer('ULTIMO_RESPALDO'),
@@ -3411,7 +3414,7 @@ function instalar() {
     `Carpeta de documentos: https://drive.google.com/drive/folders/${raiz.getId()}`,
     `Administrador: ${email}`,
     historico,
-    props.getProperty('GOOGLE_CLIENT_ID') ? 'GOOGLE_CLIENT_ID: configurado' : '⚠️ Falta GOOGLE_CLIENT_ID en Propiedades del script.'
+    'ID de cliente Google: ' + (props.getProperty('GOOGLE_CLIENT_ID') || GOOGLE_CLIENT_ID_PREDETERMINADO)
   ].join('\n');
   console.log(mensaje);
   return mensaje;

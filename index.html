@@ -170,9 +170,9 @@ textarea.campo { min-height: 70px; resize: vertical; }
 .ayuda .enlace { font-size: inherit; }
 
 /* v1.0.8: ventana "Cargando" (bloquea la pantalla mientras el servidor trabaja) */
-.cargando { position: fixed; inset: 0; z-index: 9999; background: rgba(15, 23, 42, .28); display: flex; align-items: center; justify-content: center; cursor: progress; }
-.cargando[hidden] { display: none; }
-.cargando:focus { outline: none; }
+.ventana-cargando { position: fixed; inset: 0; z-index: 9999; background: rgba(15, 23, 42, .28); display: flex; align-items: center; justify-content: center; cursor: progress; }
+.ventana-cargando[hidden] { display: none; }
+.ventana-cargando:focus { outline: none; }
 .cargando-caja { background: #fff; border-radius: 12px; padding: 18px 26px; display: flex; align-items: center; gap: 14px; box-shadow: 0 12px 32px rgba(0,0,0,.18); font-weight: 600; color: #1f2937; min-width: 220px; }
 .girador { width: 26px; height: 26px; border-radius: 50%; border: 3px solid #d1e7dd; border-top-color: #1f5f4a; animation: girar .8s linear infinite; flex: none; }
 @keyframes girar { to { transform: rotate(360deg); } }
@@ -547,7 +547,7 @@ const Cargando = (() => {
   const bloquearTeclas = (e) => { if (el && !el.hidden && e.key !== 'Tab') { e.preventDefault(); e.stopPropagation(); } };
   function crear() {
     el = document.createElement('div');
-    el.className = 'cargando';
+    el.className = 'ventana-cargando';
     el.setAttribute('role', 'alertdialog');
     el.setAttribute('aria-modal', 'true');
     el.setAttribute('aria-live', 'assertive');
@@ -1064,7 +1064,7 @@ const Pagos = (() => {
       anio: p.anio !== undefined ? p.anio : hoy.getFullYear(),
       mes: p.mes !== undefined ? p.mes : (p.anio !== undefined ? '' : hoy.getMonth() + 1),
       estado_datos: p.estado_datos || '', op: p.op || '', estado: p.estado || '', categoria: p.categoria || '',
-      texto: p.texto || '', pagina: Number(p.pagina) || 1, por_pagina: 50
+      texto: p.texto || '', pagina: Number(p.pagina) || 1, por_pagina: 100
     };
     const cats = App.estado.catalogos.categorias.map((c) => c.nombre);
     cont.innerHTML = `
@@ -1297,7 +1297,7 @@ const Pagos = (() => {
     };
     if (inicial.con_factura === undefined) inicial.con_factura = conFacturaInicial(p, cat);
     let ordenes = [];
-    try { ordenes = (await api('oc.listar', { texto: p.documento || p.beneficiario || '', estado: 'ACTIVA', por_pagina: 50 })).registros; } catch (e) { ordenes = []; }
+    try { ordenes = (await api('oc.listar', { texto: p.documento || p.beneficiario || '', estado: 'ACTIVA', por_pagina: 100 })).registros; } catch (e) { ordenes = []; }
     if (ov && !ordenes.some((o) => o.id === ov.id)) ordenes.unshift(Object.assign({}, ov, { beneficiario: p.beneficiario }));
     const lineas = [0, 1, 2].map((i) => (inicial.imputacion.lineas || [])[i] || {});
     const campoLinea = (i, k, ph, w) => `<input class="campo" data-l="${i}" data-k="${k}" value="${esc(lineas[i][k] || '')}" placeholder="${ph}" aria-label="${ph} línea ${i + 1}" style="min-width:${w || 52}px">`;
@@ -1795,7 +1795,7 @@ const Ordenes = (() => {
   }
 
   async function render(cont, p) {
-    const filtros = { tipo: p.tipo || '', estado: p.estado || '', anio: p.anio !== undefined ? p.anio : new Date().getFullYear(), mes: p.mes || '', texto: p.texto || '', pagina: 1, por_pagina: 50 };
+    const filtros = { tipo: p.tipo || '', estado: p.estado || '', anio: p.anio !== undefined ? p.anio : new Date().getFullYear(), mes: p.mes || '', texto: p.texto || '', pagina: 1, por_pagina: 100 };
     const editar = App.puede('oc.editar');
     cont.innerHTML = `
       <div class="flex flex-wrap items-center gap-2 mb-3">
@@ -2046,7 +2046,7 @@ const Beneficiarios = (() => {
     : `<span class="pill ${/^ERROR/.test(estado) ? 'pill-peligro' : 'pill-aviso'}" title="${esc(estado)}">${esc(estado.replace(/^(ERROR|INCOMPLETO) \(|\)$/g, '').toLowerCase())}</span>`);
 
   async function render(cont, p) {
-    const filtros = { texto: p.texto || '', estado: p.estado || '', pagina: 1, por_pagina: 50 };
+    const filtros = { texto: p.texto || '', estado: p.estado || '', pagina: 1, por_pagina: 100 };
     const editar = App.puede('beneficiarios.editar');
     cont.innerHTML = `
       <div class="flex flex-wrap items-center gap-2 mb-3"><h1 class="titulo-pagina mr-auto">Beneficiarios y proveedores</h1>
@@ -2266,7 +2266,7 @@ const Tasas = (() => {
   const FUENTES = { RELLENO: 'Fin de semana / feriado', MANUAL: 'Carga manual', IMPORTACION: 'Histórico', MIGRACION: 'Sistema anterior', BCV_TODAY: 'API bcv.today', BCV_TODAY_CDN: 'bcv.today (espejo)', HISTORICO_API: 'Histórico bcv.today', DOLARAPI: 'API dolarapi', BCV_WEB: 'Web del BCV' };
 
   async function render(cont) {
-    const r = await api('tasas.listar', { dias: 90 });
+    const r = await api('tasas.listar', { dias: 120 });
     const editar = App.puede('tasas.editar');
     const s = r.ultima_sincronizacion;
     cont.innerHTML = `

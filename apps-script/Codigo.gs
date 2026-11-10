@@ -27,7 +27,7 @@ function autorizarCorreo() {
 
 const APP = {
   nombre: 'ERP Guanipa · Órdenes',
-  version: '1.0.9-beta',
+  version: '1.0.10-beta',
   zona: 'America/Caracas',
   nombreLibro: 'ERP Guanipa - Base de Datos',
   nombreCarpetaRaiz: 'ERP Guanipa - Documentos'
@@ -1722,7 +1722,7 @@ function interpretarTextoTasas(texto) {
 /* ---------- Acciones de la API ---------- */
 
 function tasasListar(datos) {
-  const dias = Math.min(Number(datos.dias) || 60, 1000);
+  const dias = Math.min(Number(datos.dias) || 100, 1000);
   const todas = db.leer('Tasas').filter((t) => esFechaISO(t.fecha)).map(db.limpiar)
     .sort((a, b) => (a.fecha < b.fecha ? 1 : -1));
   const ultimaSync = propiedad('TASA_ULTIMA_SYNC');
@@ -1925,7 +1925,7 @@ function beneficiariosListar(datos) {
   const texto = normalizarTexto(datos.texto);
   const estado = datos.estado_cuenta || datos.estado || '';
   const pagina = Math.max(1, Number(datos.pagina) || 1);
-  const porPagina = Math.min(Math.max(10, Number(datos.por_pagina) || 50), 200);
+  const porPagina = Math.min(Math.max(10, Number(datos.por_pagina) || 100), 500);
   const activos = db.leer('Beneficiarios').filter((b) => b.activo !== false).map(conProblemas);
   let lista = activos;
   if (texto) {
@@ -2217,7 +2217,7 @@ function filtrarPagos(datos) {
 
 function pagosListar(datos) {
   const pagina = Math.max(1, Number(datos.pagina) || 1);
-  const porPagina = Math.min(Math.max(10, Number(datos.por_pagina) || 50), 200);
+  const porPagina = Math.min(Math.max(10, Number(datos.por_pagina) || 100), 500);
   const lista = filtrarPagos(datos).sort((a, b) => (b.numero || 0) - (a.numero || 0));
   const activos = lista.filter((p) => p.estado !== ESTADO_ANULADA);
   return {
@@ -3154,7 +3154,7 @@ function vincularPagoAOrden(pagoId, orden, usuario) {
 
 function ocListar(datos) {
   const pagina = Math.max(1, Number(datos.pagina) || 1);
-  const porPagina = Math.min(Math.max(10, Number(datos.por_pagina) || 50), 200);
+  const porPagina = Math.min(Math.max(10, Number(datos.por_pagina) || 100), 500);
   const texto = normalizarTexto(datos.texto);
   const lista = db.leer('OrdenesCompra').filter((o) => {
     if (datos.tipo && o.tipo !== datos.tipo) return false;
@@ -3921,7 +3921,7 @@ function adminGuardarUsuario(datos, usuario) {
 function adminAuditoria(datos) {
   const texto = normalizarTexto(datos.texto);
   const pagina = Math.max(1, Number(datos.pagina) || 1);
-  const porPagina = 50;
+  const porPagina = 100;
   const lista = db.leer('Auditoria').filter((a) => {
     if (datos.modulo && a.modulo !== datos.modulo) return false;
     if (texto && normalizarTexto(`${a.usuario} ${a.accion} ${a.registro_id} ${JSON.stringify(a.detalle)}`).indexOf(texto) === -1) return false;

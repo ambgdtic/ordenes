@@ -151,6 +151,16 @@ textarea.campo { min-height: 70px; resize: vertical; }
 .marca-pie { font-size: 11.5px; color: var(--suave); }
 @media print { .no-imprimir { display: none !important; } }
 
+/* Entorno de pruebas (v1.0.6) */
+.banda-pruebas { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 6px 16px; background: #fff4d6; color: #6b4a00; border-bottom: 1px solid #f0d58a; font-size: .85rem; }
+.banda-pruebas a { color: #6b4a00; font-weight: 600; text-decoration: underline; margin-left: auto; }
+.fila-problema td { background: #fff8eb; }
+.fila-problema td:first-child { box-shadow: inset 3px 0 0 #d97706; }
+.pill-peligro-suave { background: #fde8e8; color: #9b1c1c; }
+.cifra { font-size: 1.35rem; font-weight: 700; line-height: 1.2; }
+.barra-cat { height: 8px; border-radius: 4px; background: var(--superficie-2); overflow: hidden; }
+.barra-cat > span { display: block; height: 100%; background: #1f5f4a; }
+
 </style>
 </head>
 <body class="min-h-screen">
@@ -168,7 +178,7 @@ window.CONFIG = { API_URL: 'https://script.google.com/macros/s/AKfycbxigx2eZgRXu
 /**
  * Módulo: Núcleo de la interfaz (sesión, API, enrutador, componentes).
  * Sistema: ERP Alcaldía de Guanipa · Módulo de Órdenes
- * Versión: 1.0.0-beta
+ * Versión: 1.0.6-beta
  * © 2026 Soluciones AFFINITY. Todos los derechos reservados.
  */
 'use strict';
@@ -185,7 +195,12 @@ const fmt = {
   usd(n) { const t = fmt.num(n); return t ? `$ ${t}` : '—'; },
   fecha(iso) { const m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? `${m[3]}/${m[2]}/${m[1]}` : ''; },
   fechaHora(iso) { const m = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/); return m ? `${m[3]}/${m[2]}/${m[1]} ${m[4]}:${m[5]}` : ''; },
-  doc(tipo, doc) { const d = String(doc || '').replace(/\D/g, '').replace(/^0+/, ''); return d ? `${tipo || ''}-${d.replace(/\B(?=(\d{3})+(?!\d))/g, '.')}` : ''; },
+  doc(tipo, doc) {
+    const d = String(doc || '').replace(/\D/g, '').replace(/^0+/, '');
+    if (!d) return '';
+    if (['J', 'G', 'C'].includes(tipo) && d.length === 9) return `${tipo}-${d.slice(0, 8)}-${d.slice(8)}`;
+    return `${tipo || ''}-${d.replace(/\B(?=(\d{3})+(?!\d))/g, '.')}`;
+  },
   cuenta(c) { const d = String(c || '').replace(/\D/g, ''); return d.length === 20 ? d.replace(/(\d{4})(?=\d)/g, '$1-') : String(c || ''); },
   /** Interpreta "1.234,56", "1234.56" o "1,234.56". */
   aNumero(v) {
@@ -210,13 +225,36 @@ function esc(s) {
 const ICONOS_RESPALDO = {
   pencil: '✎', 'pencil-line': '✎', printer: '⎙', ban: '⊘', eye: '👁', 'file-signature': '✍', 'clipboard-list': '☰', 'rotate-ccw': '↺',
   x: '✕', plus: '+', save: '✓', 'file-check': '✓', 'refresh-cw': '⟳', 'chevron-left': '‹', 'chevron-right': '›', menu: '☰',
-  'sun-moon': '◐', 'log-out': '⏻', 'trash-2': '🗑', 'user-plus': '+', 'file-up': '⇪', 'cloud-upload': '⇪', 'file-text': '📄', check: '✓', 'cloud-download': '⇩', history: '⟲'
+  'sun-moon': '◐', 'log-out': '⏻', 'trash-2': '🗑', 'user-plus': '+', 'file-up': '⇪', 'cloud-upload': '⇪', 'file-text': '📄', check: '✓', 'cloud-download': '⇩', history: '⟲', 'flask-conical': '⚗', 'triangle-alert': '⚠', 'chart-column': '▥'
 };
 function ico(nombre, clases = '') { return `<i data-lucide="${nombre}" data-alt="${ICONOS_RESPALDO[nombre] || ''}" class="${clases}" aria-hidden="true"></i>`; }
 function $(sel, raiz = document) { return raiz.querySelector(sel); }
 function $$(sel, raiz = document) { return Array.from(raiz.querySelectorAll(sel)); }
 function demorar(fn, ms = 350) { let t; return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); }; }
 function idUnico() { return (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : 'id-' + Date.now() + '-' + Math.random().toString(16).slice(2); }
+
+/* ---------- Reglas de documentos (las mismas del servidor) ---------- */
+const reglas = {
+  documento(tipo, doc) {
+    const t = String(tipo || '').toUpperCase();
+    let d = String(doc || '').replace(/\D/g, '');
+    if (['J', 'G', 'C'].includes(t)) { while (d.length > 9 && d[0] === '0') d = d.slice(1); } else d = d.replace(/^0+/, '');
+    if (!d) return { ok: false, vacio: true, texto: 'Solo números.' };
+    if (!t) return { ok: false, texto: 'Falta el tipo (V, E, J, G o P).' };
+    if (t === 'V' || t === 'E') return d.length >= 6 && d.length <= 8 ? { ok: true, texto: 'Cédula válida.' } : { ok: false, texto: `La cédula tiene ${d.length} dígitos; debe tener entre 6 y 8.` };
+    if (['J', 'G', 'C'].includes(t)) return d.length === 9 ? { ok: true, texto: `RIF ${t}-${d.slice(0, 8)}-${d.slice(8)}` } : { ok: false, texto: `El RIF tiene ${d.length} dígitos; debe tener 9 (incluido el dígito verificador).` };
+    return d.length >= 5 && d.length <= 12 ? { ok: true, texto: 'Pasaporte.' } : { ok: false, texto: 'Pasaporte de 5 a 12 caracteres.' };
+  },
+  cuenta(c) {
+    const d = String(c || '').replace(/\D/g, '');
+    const bancos = (App.estado.catalogos && App.estado.catalogos.bancos) || {};
+    if (!d) return { ok: true, vacio: true, texto: '20 dígitos. El banco se detecta solo.' };
+    const banco = d.length >= 4 ? bancos[d.slice(0, 4)] : '';
+    if (d.length !== 20) return { ok: false, texto: `Tiene ${d.length} dígitos; deben ser 20.${banco ? ' Banco: ' + banco + '.' : ''}` };
+    if (!banco) return { ok: false, texto: `El código ${d.slice(0, 4)} no corresponde a ningún banco. Revise los primeros 4 dígitos.` };
+    return { ok: true, texto: banco };
+  }
+};
 
 /* ---------- Componentes de interfaz ---------- */
 const ui = {
@@ -348,24 +386,29 @@ const ui = {
     cont.style.position = 'relative';
     let lista = null;
     const cerrar = () => { if (lista) { lista.remove(); lista = null; } };
+    let consulta = 0;
     const buscar = demorar(async () => {
       const texto = input.value.trim();
-      if (texto.length < 3) { cerrar(); return; }
+      if (texto.length === 1) { cerrar(); return; }
+      const n = ++consulta;
       try {
         const r = await api('beneficiarios.buscar', { texto });
+        if (n !== consulta || document.activeElement !== input && !(lista && lista.contains(document.activeElement))) return;
         cerrar();
-        if (!r.length) return;
         lista = document.createElement('div');
         lista.className = 'autocompletar';
         lista.setAttribute('role', 'listbox');
-        lista.innerHTML = r.map((b, i) => `<button type="button" role="option" data-i="${i}"><strong>${esc(b.nombre)}</strong>
-          <span class="suave text-xs"> ${esc(fmt.doc(b.tipo_doc, b.documento))} · ${esc(b.cuenta || 'sin cuenta')}</span></button>`).join('');
+        lista.innerHTML = (texto ? '' : '<div class="suave text-xs px-3 py-1">Beneficiarios más frecuentes · escriba para buscar</div>') +
+          (r.length ? r.map((b, i) => `<button type="button" role="option" data-i="${i}"><strong>${esc(b.nombre)}</strong>${b.problemas && b.problemas.length ? ' <span class="pill pill-aviso">revisar datos</span>' : ''}
+          <span class="suave text-xs block">${esc(fmt.doc(b.tipo_doc, b.documento))} · ${esc(b.cuenta || 'sin cuenta')}${b.banco ? ' · ' + esc(b.banco) : ''}</span></button>`).join('')
+            : '<div class="suave text-sm px-3 py-2">No está registrado. Complete los datos y se registrará al guardar.</div>');
         cont.appendChild(lista);
         $$('button', lista).forEach((b) => b.addEventListener('click', () => { alElegir(r[Number(b.dataset.i)]); cerrar(); }));
       } catch (e) { cerrar(); }
     }, 300);
     input.setAttribute('autocomplete', 'off');
     input.addEventListener('input', buscar);
+    input.addEventListener('focus', () => { if (!lista) buscar(); });
     input.addEventListener('keydown', (e) => {
       if (e.key === 'ArrowDown' && lista) { e.preventDefault(); const b = $('button', lista); if (b) b.focus(); }
       if (e.key === 'Escape') cerrar();
@@ -373,20 +416,56 @@ const ui = {
     document.addEventListener('click', (e) => { if (!cont.contains(e.target)) cerrar(); });
   },
 
+  /** Marca el campo de cuenta en vivo. Devuelve una función que dice si se puede guardar (vacía o válida). */
   validarCuenta(input, ayuda) {
     const revisar = () => {
-      const d = input.value.replace(/\D/g, '');
-      const bancos = App.estado.catalogos.bancos || {};
-      if (!d) { ayuda.textContent = '20 dígitos. El banco se detecta solo.'; ayuda.classList.remove('error'); input.classList.remove('error'); return true; }
-      if (d.length !== 20) { ayuda.textContent = `Tiene ${d.length} dígitos; deben ser 20.`; ayuda.classList.add('error'); input.classList.add('error'); return false; }
-      ayuda.textContent = bancos[d.slice(0, 4)] || 'Banco no registrado en el catálogo';
-      ayuda.classList.remove('error'); input.classList.remove('error');
-      return true;
+      const r = reglas.cuenta(input.value);
+      ayuda.textContent = r.texto;
+      ayuda.classList.toggle('error', !r.ok);
+      input.classList.toggle('error', !r.ok);
+      input.setAttribute('aria-invalid', String(!r.ok));
+      return r.ok;
     };
     input.addEventListener('input', revisar);
     input.addEventListener('blur', () => { const d = input.value.replace(/\D/g, ''); if (d.length === 20) input.value = fmt.cuenta(d); });
     revisar();
     return revisar;
+  },
+
+  /** Igual para cédula/RIF. Los errores avisan pero no bloquean (el servidor guarda la marca). */
+  validarDocumento(selectTipo, input, ayuda) {
+    const revisar = () => {
+      const r = reglas.documento(selectTipo.value, input.value);
+      ayuda.textContent = r.texto;
+      const error = !r.ok && !r.vacio;
+      ayuda.classList.toggle('error', error);
+      input.classList.toggle('error', error);
+      input.setAttribute('aria-invalid', String(error));
+      return r.ok;
+    };
+    input.addEventListener('input', revisar);
+    selectTipo.addEventListener('change', revisar);
+    revisar();
+    return revisar;
+  },
+
+  /** Confirmación para acciones grandes: hay que escribir una palabra. */
+  confirmarEscribiendo({ titulo, mensaje, palabra, textoBoton, peligro = false }) {
+    return new Promise((resolver) => {
+      let respondido = false;
+      const m = ui.modal({
+        titulo: esc(titulo),
+        cuerpo: `<div>${mensaje}</div><div class="mt-3"><label class="etiqueta" for="conf-palabra">Para confirmar escriba <strong>${esc(palabra)}</strong></label>
+          <input id="conf-palabra" class="campo" autocomplete="off" spellcheck="false"></div>`,
+        pie: `<button class="btn" data-cerrar>Cancelar</button><button class="btn ${peligro ? 'btn-peligro' : 'btn-prim'}" id="btn-conf" disabled>${esc(textoBoton)}</button>`,
+        alCerrar: () => { if (!respondido) resolver(false); }
+      });
+      const campo = $('#conf-palabra', m.el);
+      const boton = $('#btn-conf', m.el);
+      campo.addEventListener('input', () => { boton.disabled = campo.value.trim().toUpperCase() !== palabra; });
+      campo.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !boton.disabled) boton.click(); });
+      boton.addEventListener('click', () => { respondido = true; m.cerrar(); resolver(true); });
+    });
   }
 };
 
@@ -524,6 +603,9 @@ const App = (() => {
   const estado = { usuario: null, catalogos: {}, sistema: {}, tasaHoy: null };
   const modulos = [];
   let graficos = [];
+  let entrando = null;
+  let escuchando = false;
+  let vistaActual = 0;
 
   function registrar(modulo) { modulos.push(modulo); }
   function puede(permiso) {
@@ -559,7 +641,15 @@ const App = (() => {
     }).catch((e) => { $('#gis-boton').innerHTML = `<p class="alerta alerta-peligro">${esc(e.message)}</p>`; });
   }
 
-  async function entrar() {
+  /** Google puede llamar al callback más de una vez (selección automática + botón): se entra una sola vez. */
+  function entrar() {
+    if (estado.usuario) return Promise.resolve();
+    if (entrando) return entrando;
+    entrando = entrarUnaVez().finally(() => { entrando = null; });
+    return entrando;
+  }
+
+  async function entrarUnaVez() {
     $('#app').innerHTML = '<div class="flex items-center justify-center min-h-screen suave">Verificando acceso…</div>';
     try {
       const s = await api('sesion.iniciar');
@@ -568,13 +658,21 @@ const App = (() => {
       estado.sistema = s.sistema;
       estado.tasaHoy = s.tasa_hoy;
       armarEstructura();
-      window.addEventListener('hashchange', navegar);
+      if (!escuchando) { window.addEventListener('hashchange', navegar); escuchando = true; }
       navegar();
     } catch (e) {
       try { sessionStorage.removeItem('gtoken'); } catch (x) { /* sin almacenamiento */ }
       if (window.CONFIG.TOKEN_PRUEBA) { $('#app').innerHTML = `<p class="p-6">${esc(e.message)}</p>`; return; }
       pantallaLogin(e.message);
     }
+  }
+
+  function enPruebas() { return estado.sistema && estado.sistema.entorno === 'PRUEBAS'; }
+
+  /** Tras cambiar de entorno se recarga todo para traer catálogos y correlativos del entorno nuevo. */
+  function recargarTodo(ruta) {
+    location.hash = ruta || '#/panel';
+    location.reload();
   }
 
   function modulosVisibles() { return modulos.filter((m) => !m.permiso || puede(m.permiso)); }
@@ -596,6 +694,9 @@ const App = (() => {
         </aside>
         <div id="velo" class="fixed inset-0 bg-black/40 z-20 hidden md:hidden"></div>
         <div class="flex-1 min-w-0 flex flex-col">
+          ${enPruebas() ? `<div class="banda-pruebas no-imprimir" role="status">${ico('flask-conical', 'w-4 h-4')}
+            <span><strong>ENTORNO DE PRUEBAS</strong> · datos ficticios. Lo que haga aquí no afecta la información real.</span>
+            ${puede('admin') ? '<a href="#/admin?tab=entorno">Gestionar</a>' : ''}</div>` : ''}
           <header class="barra sticky top-0 z-10 flex items-center gap-2 px-3 md:px-5 h-14 no-imprimir">
             <button id="btn-menu" class="btn btn-ico md:hidden" aria-label="Abrir menú">${ico('menu')}</button>
             <div id="titulo-barra" class="font-semibold truncate"></div>
@@ -635,12 +736,17 @@ const App = (() => {
     $$('a.nav').forEach((a) => a.classList.toggle('activo', a.dataset.mod === modulo.id));
     $('#titulo-barra').textContent = modulo.titulo;
     document.title = `${modulo.titulo} · ERP Guanipa`;
-    const cont = $('#contenido');
-    cont.innerHTML = '<div class="suave p-6">Cargando…</div>';
-    Promise.resolve(modulo.render(cont, p)).catch((e) => {
-      cont.innerHTML = `<div class="alerta alerta-peligro">${esc(e.message || e)}</div>`;
+    // Cada navegación dibuja en un contenedor nuevo: si una pantalla anterior termina de cargar tarde,
+    // escribe en un contenedor ya retirado y su error no se muestra.
+    const n = ++vistaActual;
+    const vista = document.createElement('div');
+    vista.innerHTML = '<div class="suave p-6">Cargando…</div>';
+    $('#contenido').replaceChildren(vista);
+    Promise.resolve().then(() => modulo.render(vista, p)).catch((e) => {
+      if (n !== vistaActual) { console.warn('Pantalla anterior descartada:', e && e.message); return; }
+      vista.innerHTML = `<div class="alerta alerta-peligro">${esc(e.message || e)}</div>`;
       console.error(e);
-    }).finally(() => ui.iconos());
+    }).finally(() => { if (n === vistaActual) ui.iconos(); });
   }
 
   function grafico(canvas, config) {
@@ -654,7 +760,7 @@ const App = (() => {
     return g;
   }
 
-  return { estado, registrar, puede, iniciar, navegar, grafico };
+  return { estado, registrar, puede, iniciar, navegar, grafico, enPruebas, recargarTodo };
 })();
 
 ;
@@ -684,7 +790,8 @@ App.registrar({
     const avisos = [];
     if (k.por_completar) avisos.push(`<a href="#/pagos?estado_datos=POR_COMPLETAR&anio=${anio}&mes=${mes}">${k.por_completar} pago(s) por completar</a> antes de poder emitir su Orden de Pago.`);
     if (k.sin_tasa) avisos.push(`${k.sin_tasa} pago(s) sin tasa BCV. <a href="#/tasas">Revise las tasas</a>.`);
-    if (d.beneficiarios_con_problemas) avisos.push(`<a href="#/beneficiarios?estado=PROBLEMA">${d.beneficiarios_con_problemas} beneficiario(s)</a> con cuenta faltante o inválida.`);
+    if (d.beneficiarios_con_problemas) avisos.push(`<a href="#/beneficiarios?estado=PROBLEMA">${d.beneficiarios_con_problemas} beneficiario(s)</a> con errores en la cédula/RIF o en la cuenta.`);
+    if (!k.cantidad && App.enPruebas()) avisos.push('Los datos de prueba están en los dos meses anteriores: cambie el mes arriba o <a href="#/pagos?anio=&mes=">vea todos los pagos</a>.');
     if (!d.tasa_hoy || !d.tasa_hoy.exacta) avisos.push('La tasa BCV de hoy aún no está registrada; se usa la última disponible.');
 
     cont.innerHTML = `
@@ -916,7 +1023,7 @@ const Pagos = (() => {
           <div class="sm:col-span-1"><label class="etiqueta" for="p-tipo">Tipo</label>
             <select id="p-tipo" class="campo">${ui.opciones(['V', 'E', 'J', 'G', 'P'], p.tipo_doc, '—')}</select></div>
           <div class="sm:col-span-2"><label class="etiqueta" for="p-doc">Cédula / RIF</label>
-            <input id="p-doc" class="campo" inputmode="numeric" value="${esc(p.documento || '')}"></div>
+            <input id="p-doc" class="campo" inputmode="numeric" value="${esc(p.documento || '')}"><p id="p-doc-ayuda" class="ayuda"></p></div>
           <div class="sm:col-span-3"><label class="etiqueta" for="p-cuenta">Cuenta bancaria del beneficiario</label>
             <input id="p-cuenta" class="campo" inputmode="numeric" value="${esc(p.cuenta || '')}" placeholder="0102-0000-0000-0000-0000"><p id="p-cuenta-ayuda" class="ayuda"></p></div>
           <div class="sm:col-span-3"><label class="etiqueta" for="p-cat">Categoría</label>
@@ -931,13 +1038,28 @@ const Pagos = (() => {
     });
     const el = m.el;
     const revisarCuenta = ui.validarCuenta($('#p-cuenta', el), $('#p-cuenta-ayuda', el));
-    ui.autocompletarBeneficiario($('#p-ben', el), (b) => {
+    const revisarDoc = ui.validarDocumento($('#p-tipo', el), $('#p-doc', el), $('#p-doc-ayuda', el));
+    const usarBeneficiario = (b) => {
       $('#p-ben', el).value = b.nombre;
       $('#p-tipo', el).value = b.tipo_doc;
       $('#p-doc', el).value = b.documento;
-      if (b.cuenta && !$('#p-cuenta', el).value) $('#p-cuenta', el).value = b.cuenta;
+      if (b.cuenta && (nuevo || !$('#p-cuenta', el).value)) $('#p-cuenta', el).value = b.cuenta;
       if (b.categoria_sugerida && !$('#p-cat', el).value) $('#p-cat', el).value = b.categoria_sugerida;
       revisarCuenta();
+      revisarDoc();
+      if (b.problemas && b.problemas.length) ui.toast(`Revise los datos de ${b.nombre}: ${b.problemas.join(' · ')}`, 'aviso', 8000);
+    };
+    ui.autocompletarBeneficiario($('#p-ben', el), usarBeneficiario);
+    // Si escriben primero la cédula/RIF, se buscan los demás datos en el registro.
+    $('#p-doc', el).addEventListener('blur', async () => {
+      const doc = $('#p-doc', el).value.replace(/\D/g, '');
+      if (doc.length < 5 || $('#p-ben', el).value.trim()) return;
+      try {
+        const r = await api('beneficiarios.buscar', { texto: doc });
+        const t = $('#p-tipo', el).value;
+        const candidatos = r.filter((b) => !t || b.tipo_doc === t);
+        if (candidatos.length === 1) { usarBeneficiario(candidatos[0]); ui.toast(`Datos de ${candidatos[0].nombre} cargados del registro.`, 'info'); }
+      } catch (e) { /* la búsqueda es solo una ayuda */ }
     });
     if ($('#btn-tasa', el)) {
       $('#btn-tasa', el).addEventListener('click', async (ev) => {
@@ -1096,7 +1218,7 @@ App.registrar({ id: 'pagos', titulo: 'Pagos y OP', icono: 'receipt', permiso: 'v
 ;
 /**
  * Módulo: Importación de conciliaciones bancarias (vista previa, corrección y confirmación).
- * Sistema: ERP Alcaldía de Guanipa · Módulo de Órdenes · v1.0.0-beta
+ * Sistema: ERP Alcaldía de Guanipa · Módulo de Órdenes · v1.0.6-beta
  * © 2026 Soluciones AFFINITY.
  */
 'use strict';
@@ -1110,6 +1232,8 @@ const Importar = (() => {
     cont.innerHTML = `
       <div class="flex flex-wrap items-center gap-2 mb-3"><h1 class="titulo-pagina mr-auto">Importar conciliación bancaria</h1>
         <a class="btn" href="#/pagos">${ico('arrow-left')} Volver a pagos</a></div>
+      ${App.enPruebas() ? `<div class="alerta alerta-aviso mb-3 flex flex-wrap items-center gap-2"><span class="mr-auto">${ico('flask-conical', 'inline w-4 h-4')} Entorno de pruebas: puede practicar con una conciliación ficticia del mes actual (5 débitos, 1 crédito que se ignora).</span>
+        <button class="btn btn-chico" id="btn-ejemplo">Cargar ejemplo</button></div>` : ''}
       ${pendiente ? `<div class="alerta alerta-info mb-3 flex flex-wrap items-center gap-2">Hay una importación sin terminar (${pendiente.movimientos.length} movimientos).
         <button class="btn btn-chico" id="btn-recuperar">Continuarla</button><button class="btn btn-chico" id="btn-descartar">Descartar</button></div>` : ''}
       <div id="paso1" class="tarjeta p-5">
@@ -1140,6 +1264,18 @@ const Importar = (() => {
       $$('.pestana', cont).forEach((x) => x.setAttribute('aria-selected', String(x === t)));
       $$('[data-panel]', cont).forEach((p) => { p.hidden = p.dataset.panel !== t.dataset.t; });
     }));
+    if ($('#btn-ejemplo')) {
+      $('#btn-ejemplo').addEventListener('click', async (ev) => {
+        const btn = ev.currentTarget;
+        ui.ocupado(btn, true);
+        try {
+          const r = await api('conciliacion.ejemplo');
+          $('.pestana[data-t="texto"]', cont).click();
+          $('#texto-pegado').value = r.texto;
+          ui.toast('Ejemplo cargado. Pulse "Analizar".', 'info');
+        } catch (e) { ui.error(e); } finally { ui.ocupado(btn, false); }
+      });
+    }
     const zona = $('#zona');
     const input = $('#archivo');
     zona.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); input.click(); } });
@@ -1182,6 +1318,18 @@ const Importar = (() => {
 
   async function analizarArchivo(archivo) {
     if (archivo.size > MAX_BYTES) { ui.toast('El archivo supera 8 MB. Divídalo por mes.', 'error'); return; }
+    if ($('#btn-ejemplo')) {
+      $('#btn-ejemplo').addEventListener('click', async (ev) => {
+        const btn = ev.currentTarget;
+        ui.ocupado(btn, true);
+        try {
+          const r = await api('conciliacion.ejemplo');
+          $('.pestana[data-t="texto"]', cont).click();
+          $('#texto-pegado').value = r.texto;
+          ui.toast('Ejemplo cargado. Pulse "Analizar".', 'info');
+        } catch (e) { ui.error(e); } finally { ui.ocupado(btn, false); }
+      });
+    }
     const zona = $('#zona');
     zona.innerHTML = `<span class="block font-semibold">Analizando ${esc(archivo.name)}…</span><span class="suave text-sm">Esto puede tardar unos segundos.</span>`;
     try {
@@ -1435,7 +1583,7 @@ const Ordenes = (() => {
             <div class="sm:col-span-2"><label class="etiqueta" for="oc-proc">Número de proceso</label><input id="oc-proc" class="campo" maxlength="60" value="${esc(d.numero_proceso || '')}" placeholder="AMBG-UC-CD-0000-${new Date().getFullYear()}"></div>
             <div class="sm:col-span-2"><label class="etiqueta" for="oc-ben">Proveedor o beneficiario</label><input id="oc-ben" class="campo" maxlength="200" value="${esc(d.beneficiario || '')}" placeholder="Buscar en el registro…"></div>
             <div><label class="etiqueta" for="oc-tipodoc">Tipo</label><select id="oc-tipodoc" class="campo">${ui.opciones(['J', 'G', 'V', 'E', 'P'], d.tipo_doc, '—')}</select></div>
-            <div><label class="etiqueta" for="oc-doc">R.I.F. / C.I.</label><input id="oc-doc" class="campo" inputmode="numeric" value="${esc(d.documento || '')}"></div>
+            <div><label class="etiqueta" for="oc-doc">R.I.F. / C.I.</label><input id="oc-doc" class="campo" inputmode="numeric" value="${esc(d.documento || '')}"><p id="oc-doc-ayuda" class="ayuda"></p></div>
             <div class="sm:col-span-2"><label class="etiqueta" for="oc-unidad">Unidad solicitante</label>
               <input id="oc-unidad" class="campo" list="lista-unidades" value="${esc(d.unidad_solicitante || '')}"><datalist id="lista-unidades">${cat.unidades.map((u) => `<option value="${esc(u)}">`).join('')}</datalist></div>
             <div><label class="etiqueta" for="oc-tpago">Tipo de pago</label><input id="oc-tpago" class="campo" list="lista-tpago" value="${esc(d.tipo_pago)}"><datalist id="lista-tpago"><option value="TRANSFERENCIA"><option value="CHEQUE"><option value="EFECTIVO"></datalist></div>
@@ -1529,8 +1677,10 @@ const Ordenes = (() => {
     $('#form-oc', el).addEventListener('input', demorar(totales, 200));
     $('#form-oc', el).addEventListener('change', totales);
     $('#add-item', el).addEventListener('click', () => { leerItems(); if (items.length < MAX_ITEMS) items.push({ cantidad: 1 }); pintarItems(); totales(); });
+    const revisarDoc = ui.validarDocumento($('#oc-tipodoc', el), $('#oc-doc', el), $('#oc-doc-ayuda', el));
     ui.autocompletarBeneficiario($('#oc-ben', el), (b) => {
-      $('#oc-ben', el).value = b.nombre; $('#oc-tipodoc', el).value = b.tipo_doc; $('#oc-doc', el).value = b.documento; totales();
+      $('#oc-ben', el).value = b.nombre; $('#oc-tipodoc', el).value = b.tipo_doc; $('#oc-doc', el).value = b.documento; revisarDoc(); totales();
+      if (b.problemas && b.problemas.length) ui.toast(`Revise los datos de ${b.nombre}: ${b.problemas.join(' · ')}`, 'aviso', 8000);
     });
     $('#oc-prev', el).addEventListener('click', async (ev) => {
       const btn = ev.currentTarget;
@@ -1566,51 +1716,115 @@ App.registrar({ id: 'ordenes', titulo: 'Compras y servicios', icono: 'clipboard-
 
 ;
 /**
- * Módulo: Registro de beneficiarios y proveedores.
- * Sistema: ERP Alcaldía de Guanipa · Módulo de Órdenes · v1.0.0-beta
+ * Módulo: Registro de beneficiarios y proveedores, con ficha de historial de pagos.
+ * Los registros con errores de documento o cuenta aparecen primero para corregirlos.
+ * Sistema: ERP Alcaldía de Guanipa · Módulo de Órdenes · v1.0.6-beta
  * © 2026 Soluciones AFFINITY.
  */
 'use strict';
 
 const Beneficiarios = (() => {
+  const pillEstado = (estado) => (estado === 'VÁLIDO'
+    ? '<span class="pill pill-ok">Válido</span>'
+    : `<span class="pill ${/^ERROR/.test(estado) ? 'pill-peligro' : 'pill-aviso'}" title="${esc(estado)}">${esc(estado.replace(/^(ERROR|INCOMPLETO) \(|\)$/g, '').toLowerCase())}</span>`);
+
   async function render(cont, p) {
-    const filtros = { texto: p.texto || '', estado_cuenta: p.estado || '', pagina: 1, por_pagina: 50 };
+    const filtros = { texto: p.texto || '', estado: p.estado || '', pagina: 1, por_pagina: 50 };
     const editar = App.puede('beneficiarios.editar');
     cont.innerHTML = `
       <div class="flex flex-wrap items-center gap-2 mb-3"><h1 class="titulo-pagina mr-auto">Beneficiarios y proveedores</h1>
         ${editar ? `<button class="btn btn-prim" id="btn-nuevo">${ico('user-plus')} Nuevo</button>` : ''}</div>
       <div class="tarjeta p-3 mb-3 flex flex-wrap gap-2">
         <input id="f-texto" class="campo flex-1 min-w-[220px]" placeholder="Buscar por nombre o cédula/RIF…" value="${esc(filtros.texto)}" aria-label="Buscar">
-        <select id="f-estado" class="campo" style="width:auto" aria-label="Estado de la cuenta">${ui.opciones([{ valor: 'VALIDO', texto: 'Cuenta válida' }, { valor: 'PROBLEMA', texto: 'Sin cuenta o con error' }], filtros.estado_cuenta, 'Todos')}</select>
+        <select id="f-estado" class="campo" style="width:auto" aria-label="Estado de los datos">${ui.opciones([{ valor: 'PROBLEMA', texto: 'Con errores en documento o cuenta' }, { valor: 'VALIDO', texto: 'Datos válidos' }], filtros.estado, 'Todos')}</select>
       </div>
-      <div id="aviso"></div>
-      <div class="tarjeta"><div id="tabla" class="tabla-env"></div><div id="pag"></div></div>`;
-    const aplicar = () => { filtros.texto = $('#f-texto').value.trim(); filtros.estado_cuenta = $('#f-estado').value; filtros.pagina = 1; cargar(); };
-    $('#f-texto').addEventListener('input', demorar(aplicar, 400));
-    $('#f-estado').addEventListener('change', aplicar);
-    if ($('#btn-nuevo')) $('#btn-nuevo').addEventListener('click', () => formulario({}, cargar));
+      <div id="aviso-ben"></div>
+      <div class="tarjeta"><div id="tabla-ben" class="tabla-env"></div><div id="pag-ben"></div></div>
+      <p class="suave text-xs mt-2">Reglas: cédula V/E de 6 a 8 dígitos · RIF J/G de 9 dígitos (con el verificador) · cuenta de 20 dígitos de un banco existente. Toque una fila para ver su historial.</p>`;
+    const tabla = $('#tabla-ben', cont);
+    const aplicar = () => { filtros.texto = $('#f-texto', cont).value.trim(); filtros.estado = $('#f-estado', cont).value; filtros.pagina = 1; cargar(); };
+    $('#f-texto', cont).addEventListener('input', demorar(aplicar, 400));
+    $('#f-estado', cont).addEventListener('change', aplicar);
+    if ($('#btn-nuevo', cont)) $('#btn-nuevo', cont).addEventListener('click', () => formulario({}, cargar));
 
     async function cargar() {
-      const tabla = $('#tabla');
       tabla.innerHTML = '<div class="suave p-6">Cargando…</div>';
       try {
         const r = await api('beneficiarios.listar', filtros);
-        $('#aviso').innerHTML = r.con_problemas && filtros.estado_cuenta !== 'PROBLEMA'
-          ? `<div class="alerta alerta-aviso mb-3">${r.con_problemas} beneficiario(s) sin cuenta o con número inválido. <a href="#/beneficiarios?estado=PROBLEMA">Revisarlos</a>.</div>` : '';
-        if (!r.registros.length) { tabla.innerHTML = '<div class="suave p-6">Sin resultados.</div>'; $('#pag').innerHTML = ''; return; }
-        tabla.innerHTML = `<table class="tabla"><thead><tr><th>Documento</th><th>Nombre o razón social</th><th>Cuenta</th><th>Estado</th>${editar ? '<th></th>' : ''}</tr></thead><tbody>
-          ${r.registros.map((b) => `<tr><td class="whitespace-nowrap">${esc(fmt.doc(b.tipo_doc, b.documento))}</td>
+        $('#aviso-ben', cont).innerHTML = r.con_problemas && filtros.estado !== 'PROBLEMA'
+          ? `<div class="alerta alerta-aviso mb-3">${ico('triangle-alert', 'inline w-4 h-4')} <strong>${r.con_problemas}</strong> beneficiario(s) con errores en la cédula/RIF o en la cuenta. Aparecen de primero en la lista. <a href="#/beneficiarios?estado=PROBLEMA">Ver solo esos</a>.</div>` : '';
+        if (!r.registros.length) { tabla.innerHTML = '<div class="suave p-6">Sin resultados.</div>'; $('#pag-ben', cont).innerHTML = ''; return; }
+        tabla.innerHTML = `<table class="tabla"><thead><tr><th>Documento</th><th>Nombre o razón social</th><th>Cuenta</th><th>Revisión</th>${editar ? '<th></th>' : ''}</tr></thead><tbody>
+          ${r.registros.map((b) => `<tr class="${b.problemas.length ? 'fila-problema' : ''} cursor-pointer" data-ver="${b.id}" tabindex="0" aria-label="Ver historial de ${esc(b.nombre)}">
+            <td class="whitespace-nowrap">${esc(fmt.doc(b.tipo_doc, b.documento))}${b.estado_documento !== 'VÁLIDO' ? `<div>${pillEstado(b.estado_documento)}</div>` : ''}</td>
             <td><div class="font-medium">${esc(b.nombre)}</div>${b.alias ? `<div class="suave text-xs">También: ${esc(b.alias.split('|').join(' · '))}</div>` : ''}</td>
-            <td class="whitespace-nowrap">${esc(b.cuenta || '—')}<div class="suave text-xs">${esc(b.banco || '')}</div></td>
-            <td><span class="pill ${b.estado_cuenta === 'VÁLIDO' ? 'pill-ok' : 'pill-aviso'}">${esc(b.estado_cuenta)}</span></td>
+            <td class="whitespace-nowrap">${esc(b.cuenta || '—')}<div class="suave text-xs">${esc(b.banco || '')}</div>${b.estado_cuenta !== 'VÁLIDO' ? `<div>${pillEstado(b.estado_cuenta)}</div>` : ''}</td>
+            <td>${b.problemas.length ? `<span class="pill pill-peligro">${ico('triangle-alert', 'w-3 h-3')} ${b.problemas.length === 1 ? '1 error' : b.problemas.length + ' errores'}</span>` : '<span class="pill pill-ok">Correcto</span>'}</td>
             ${editar ? `<td class="text-right"><button class="btn btn-ico" data-id="${b.id}" aria-label="Editar ${esc(b.nombre)}">${ico('pencil')}</button></td>` : ''}</tr>`).join('')}
           </tbody></table>`;
-        $('#pag').replaceChildren(ui.paginacion(r.total, r.pagina, r.por_pagina, (n) => { filtros.pagina = n; cargar(); }));
-        $$('[data-id]', tabla).forEach((b) => b.addEventListener('click', () => formulario(r.registros.find((x) => x.id === b.dataset.id), cargar)));
+        $('#pag-ben', cont).replaceChildren(ui.paginacion(r.total, r.pagina, r.por_pagina, (n) => { filtros.pagina = n; cargar(); }));
+        $$('[data-id]', tabla).forEach((b) => b.addEventListener('click', (ev) => { ev.stopPropagation(); formulario(r.registros.find((x) => x.id === b.dataset.id), cargar); }));
+        $$('[data-ver]', tabla).forEach((fila) => {
+          const abrir = () => ficha(fila.dataset.ver, cargar);
+          fila.addEventListener('click', abrir);
+          fila.addEventListener('keydown', (e) => { if (e.key === 'Enter') abrir(); });
+        });
         ui.iconos();
       } catch (e) { tabla.innerHTML = `<div class="alerta alerta-peligro m-3">${esc(e.message)}</div>`; }
     }
-    cargar();
+    await cargar();
+  }
+
+  /* ---------- Ficha: cuánto se le ha pagado, por qué y cada cuánto ---------- */
+  async function ficha(id, recargar) {
+    const m = ui.modal({ titulo: 'Historial del beneficiario', tamano: 'grande', cuerpo: '<div class="suave p-6">Cargando…</div>' });
+    const cuerpo = $('.modal-cuerpo', m.el);
+    try {
+      const d = await api('beneficiarios.detalle', { id });
+      const b = d.beneficiario;
+      const r = d.resumen;
+      const maxCat = Math.max(1, ...d.por_categoria.map((c) => c.monto));
+      const frecuencia = r.dias_entre_pagos === null ? (r.cantidad === 1 ? 'Un solo pago' : 'Sin pagos')
+        : r.dias_entre_pagos <= 1 ? 'Casi a diario' : `Cada ${fmt.num(r.dias_entre_pagos, 0)} días en promedio`;
+      $('h2', m.el).textContent = b.nombre;
+      cuerpo.innerHTML = `
+        <div class="flex flex-wrap gap-x-6 gap-y-1 text-sm mb-3">
+          <span><span class="suave">Documento:</span> <strong>${esc(fmt.doc(b.tipo_doc, b.documento))}</strong> ${b.estado_documento !== 'VÁLIDO' ? pillEstado(b.estado_documento) : ''}</span>
+          <span><span class="suave">Cuenta:</span> <strong>${esc(b.cuenta || '—')}</strong> ${esc(b.banco || '')} ${b.estado_cuenta !== 'VÁLIDO' ? pillEstado(b.estado_cuenta) : ''}</span>
+        </div>
+        ${b.problemas.length ? `<div class="alerta alerta-peligro mb-3 flex flex-wrap items-center gap-2"><span class="mr-auto">${ico('triangle-alert', 'inline w-4 h-4')} ${esc(b.problemas.join(' · '))}</span>
+          ${App.puede('beneficiarios.editar') ? '<button class="btn btn-chico" id="f-corregir">Corregir ahora</button>' : ''}</div>` : ''}
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-4">
+          <div class="tarjeta p-3"><div class="kpi-etiqueta">Total pagado</div><div class="cifra">${fmt.bs(r.total_bs)}</div><div class="suave text-xs">${fmt.usd(r.total_usd)} a la tasa de cada pago</div></div>
+          <div class="tarjeta p-3"><div class="kpi-etiqueta">Pagos</div><div class="cifra">${fmt.num(r.cantidad, 0)}</div><div class="suave text-xs">Promedio ${fmt.bs(r.promedio_bs)} · ${fmt.usd(r.promedio_usd)}</div></div>
+          <div class="tarjeta p-3"><div class="kpi-etiqueta">Frecuencia</div><div class="cifra" style="font-size:1.05rem">${esc(frecuencia)}</div><div class="suave text-xs">${r.primer_pago ? `Desde ${fmt.fecha(r.primer_pago)} · último ${fmt.fecha(r.ultimo_pago)}` : ''}</div></div>
+          <div class="tarjeta p-3"><div class="kpi-etiqueta">Órdenes</div><div class="cifra">${fmt.num(r.op_generadas, 0)} OP</div><div class="suave text-xs">${fmt.num(r.ordenes_compra_servicio, 0)} OC/OS · ${fmt.bs(r.monto_ordenes)}</div></div>
+        </div>
+        ${r.cantidad ? `<div class="grid grid-cols-1 lg:grid-cols-2 gap-3 mb-4">
+          <div class="tarjeta p-3"><h3 class="font-semibold mb-2 text-sm">Motivos (por categoría)</h3>
+            <div class="space-y-2">${d.por_categoria.map((c) => `<div><div class="flex justify-between text-sm gap-2"><span>${ui.pillCategoria(c.categoria === 'Sin categoría' ? '' : c.categoria)} <span class="suave">× ${c.cantidad}</span></span><strong>${fmt.bs(c.monto)}</strong></div>
+              <div class="barra-cat mt-1"><span style="width:${Math.max(3, Math.round(c.monto / maxCat * 100))}%"></span></div></div>`).join('')}</div></div>
+          <div class="tarjeta p-3"><h3 class="font-semibold mb-2 text-sm">Pagado por mes (US$)</h3><div style="height:180px"><canvas id="g-ben-mes" aria-label="Pagos por mes en dólares"></canvas></div></div>
+        </div>
+        <h3 class="font-semibold mb-2 text-sm">Últimos pagos</h3>
+        <div class="tarjeta tabla-env"><table class="tabla"><thead><tr><th>N°</th><th>Fecha</th><th>Categoría</th><th>Descripción</th><th class="num">Monto</th><th>OP</th></tr></thead><tbody>
+          ${d.ultimos_pagos.map((x) => `<tr><td><a href="#/pagos?anio=&mes=&texto=${encodeURIComponent(x.numero)}" data-cerrar>${esc(x.numero)}</a></td><td class="whitespace-nowrap">${fmt.fecha(x.fecha)}</td>
+            <td>${ui.pillCategoria(x.categoria)}</td><td class="text-xs">${esc((x.descripcion || '').slice(0, 90))}</td>
+            <td class="num whitespace-nowrap">${fmt.bs(x.monto)}<div class="suave text-xs">${fmt.usd(x.monto_usd)}</div></td>
+            <td>${x.op_generada ? '<span class="pill pill-ok">Generada</span>' : '<span class="pill pill-neutro">Pendiente</span>'}</td></tr>`).join('')}
+        </tbody></table></div>` : '<div class="suave p-4 tarjeta">Este beneficiario todavía no tiene pagos registrados.</div>'}`;
+      $$('[data-cerrar]', cuerpo).forEach((a) => a.addEventListener('click', m.cerrar));
+      if ($('#f-corregir', cuerpo)) $('#f-corregir', cuerpo).addEventListener('click', () => { m.cerrar(); formulario(b, recargar); });
+      const lienzo = $('#g-ben-mes', cuerpo);
+      if (lienzo) {
+        App.grafico(lienzo, {
+          type: 'bar',
+          data: { labels: d.por_mes.map((x) => `${MESES[Number(x.mes.slice(5, 7)) - 1].slice(0, 3)} ${x.mes.slice(2, 4)}`), datasets: [{ label: 'US$', data: d.por_mes.map((x) => x.monto_usd), backgroundColor: '#1f5f4a', borderRadius: 4 }] },
+          options: { maintainAspectRatio: false, plugins: { legend: { display: false }, tooltip: { callbacks: { label: (c) => `${fmt.usd(c.raw)} · ${fmt.bs(d.por_mes[c.dataIndex].monto)}` } } }, scales: { y: { ticks: { callback: (v) => fmt.num(v, 0) } } } }
+        });
+      }
+      ui.iconos();
+    } catch (e) { cuerpo.innerHTML = `<div class="alerta alerta-peligro">${esc(e.message)}</div>`; }
   }
 
   function formulario(b, recargar) {
@@ -1618,7 +1832,7 @@ const Beneficiarios = (() => {
       titulo: b.id ? 'Editar beneficiario' : 'Nuevo beneficiario',
       cuerpo: `<form class="grid grid-cols-1 sm:grid-cols-4 gap-3" novalidate>
         <div><label class="etiqueta" for="b-tipo">Tipo</label><select id="b-tipo" class="campo">${ui.opciones(['V', 'E', 'J', 'G', 'P'], b.tipo_doc, '—')}</select></div>
-        <div class="sm:col-span-3"><label class="etiqueta" for="b-doc">Cédula / RIF (solo números)</label><input id="b-doc" class="campo" inputmode="numeric" value="${esc(b.documento || '')}"></div>
+        <div class="sm:col-span-3"><label class="etiqueta" for="b-doc">Cédula / RIF (solo números)</label><input id="b-doc" class="campo" inputmode="numeric" value="${esc(b.documento || '')}"><p class="ayuda" id="b-doc-ayuda"></p></div>
         <div class="sm:col-span-4"><label class="etiqueta" for="b-nom">Nombre o razón social</label><input id="b-nom" class="campo" maxlength="200" value="${esc(b.nombre || '')}"></div>
         <div class="sm:col-span-4"><label class="etiqueta" for="b-cta">Cuenta bancaria</label><input id="b-cta" class="campo" inputmode="numeric" value="${esc(b.cuenta || '')}"><p class="ayuda" id="b-cta-ayuda"></p></div>
         <div class="sm:col-span-2"><label class="etiqueta" for="b-tel">Teléfono</label><input id="b-tel" class="campo" type="tel" value="${esc(b.telefono || '')}"></div>
@@ -1629,25 +1843,29 @@ const Beneficiarios = (() => {
       pie: '<button class="btn" data-cerrar>Cancelar</button><button class="btn btn-prim" id="b-guardar">Guardar</button>'
     });
     const el = m.el;
-    const ok = ui.validarCuenta($('#b-cta', el), $('#b-cta-ayuda', el));
+    const cuentaOk = ui.validarCuenta($('#b-cta', el), $('#b-cta-ayuda', el));
+    const docOk = ui.validarDocumento($('#b-tipo', el), $('#b-doc', el), $('#b-doc-ayuda', el));
     $('#b-guardar', el).addEventListener('click', async (ev) => {
       const btn = ev.currentTarget;
-      if (!ok()) return;
+      if (!docOk() || !cuentaOk()) {
+        const seguir = await ui.confirmar({ titulo: 'Datos con errores', mensaje: 'La cédula/RIF o la cuenta no cumplen las reglas. Se guardará marcado como "con errores" y aparecerá de primero en la lista hasta corregirlo. ¿Guardar así?', textoBoton: 'Guardar con errores' });
+        if (!seguir) return;
+      }
       ui.ocupado(btn, true);
       try {
-        await api('beneficiarios.guardar', {
+        const r = await api('beneficiarios.guardar', {
           id: b.id, tipo_doc: $('#b-tipo', el).value, documento: $('#b-doc', el).value, nombre: $('#b-nom', el).value,
           cuenta: $('#b-cta', el).value, telefono: $('#b-tel', el).value, correo: $('#b-mail', el).value, notas: $('#b-notas', el).value,
           activo: $('#b-activo', el) ? $('#b-activo', el).checked : true
         }, { escritura: true });
         m.cerrar();
-        ui.toast('Beneficiario guardado.', 'exito');
+        ui.toast(r.avisos && r.avisos.length ? `Guardado con errores: ${r.avisos.join(' · ')}` : 'Beneficiario guardado.', r.avisos && r.avisos.length ? 'aviso' : 'exito', 7000);
         recargar();
       } catch (e) { ui.error(e); } finally { ui.ocupado(btn, false); }
     });
   }
 
-  return { render };
+  return { render, ficha };
 })();
 
 App.registrar({ id: 'beneficiarios', titulo: 'Beneficiarios', icono: 'users', permiso: 'ver', render: Beneficiarios.render });
@@ -1771,22 +1989,22 @@ App.registrar({ id: 'tasas', titulo: 'Tasa BCV', icono: 'trending-up', permiso: 
 ;
 /**
  * Módulo: Administración (estado, configuración, usuarios, auditoría y migración).
- * Sistema: ERP Alcaldía de Guanipa · Módulo de Órdenes · v1.0.0-beta
+ * Sistema: ERP Alcaldía de Guanipa · Módulo de Órdenes · v1.0.6-beta
  * © 2026 Soluciones AFFINITY.
  */
 'use strict';
 
 const Admin = (() => {
   const ROLES = { ADMIN: 'Administrador', TESORERIA: 'Tesorería', COMPRAS: 'Compras', CONSULTA: 'Consulta' };
-  const PESTANAS = [['sistema', 'Sistema'], ['config', 'Configuración'], ['usuarios', 'Usuarios'], ['auditoria', 'Auditoría'], ['migracion', 'Migración']];
+  const PESTANAS = [['sistema', 'Sistema'], ['entorno', 'Entorno de pruebas'], ['config', 'Configuración'], ['usuarios', 'Usuarios'], ['auditoria', 'Auditoría'], ['migracion', 'Migración']];
 
   async function render(cont, p) {
     const actual = PESTANAS.some(([k]) => k === p.tab) ? p.tab : 'sistema';
     cont.innerHTML = `<h1 class="titulo-pagina mb-3">Administración</h1>
       <div class="pestanas mb-4" role="tablist">${PESTANAS.map(([k, t]) => `<a class="pestana" role="tab" aria-selected="${k === actual}" href="#/admin?tab=${k}" style="text-decoration:none">${t}</a>`).join('')}</div>
       <div id="panel-admin"></div>`;
-    const panel = $('#panel-admin');
-    await ({ sistema, config: configuracion, usuarios, auditoria, migracion })[actual](panel);
+    const panel = $('#panel-admin', cont);
+    await ({ sistema, entorno, config: configuracion, usuarios, auditoria, migracion })[actual](panel);
     ui.iconos();
   }
 
@@ -1799,6 +2017,7 @@ const Admin = (() => {
           <h2 class="font-semibold">Recursos</h2>
           <p><a href="${esc(e.base_datos_url)}" target="_blank" rel="noopener">${ico('sheet', 'inline w-4 h-4')} Base de datos (Google Sheets)</a></p>
           <p><a href="${esc(e.carpeta_url)}" target="_blank" rel="noopener">${ico('folder', 'inline w-4 h-4')} Carpeta de documentos (Drive)</a></p>
+          <p class="text-sm">Entorno: ${e.entorno === 'PRUEBAS' ? '<span class="pill pill-aviso">PRUEBAS (datos ficticios)</span>' : '<span class="pill pill-ok">Producción</span>'}</p>
           <p class="text-sm">Versión <strong>${esc(e.version)}</strong> · ID de cliente Google: ${e.client_id_configurado ? '<span class="pill pill-ok">configurado</span>' : '<span class="pill pill-peligro">falta</span>'}</p>
           <p class="text-sm">Disparadores: ${e.disparadores.length ? e.disparadores.map((d) => `<span class="pill pill-neutro">${esc(d)}</span>`).join(' ') : '<span class="pill pill-peligro">ninguno</span>'}</p>
         </div>
@@ -1817,6 +2036,71 @@ const Admin = (() => {
       const btn = ev.currentTarget;
       ui.ocupado(btn, true);
       try { await api('admin.respaldar', {}, { escritura: true }); ui.toast('Respaldo creado en Drive.', 'exito'); App.navegar(); } catch (x) { ui.error(x); } finally { ui.ocupado(btn, false); }
+    });
+  }
+
+  /* ---------- Entorno de pruebas ---------- */
+  async function entorno(panel) {
+    const e = await api('entorno.estado');
+    const enPruebas = e.activo === 'PRUEBAS';
+    const conteos = (c) => `<div class="flex flex-wrap gap-2 text-sm"><span class="pill pill-info">Pagos: ${fmt.num(c.pagos, 0)}</span><span class="pill pill-info">Beneficiarios: ${fmt.num(c.beneficiarios, 0)}</span>
+      <span class="pill pill-info">OP generadas: ${fmt.num(c.ordenes_pago, 0)}</span><span class="pill pill-info">OC/OS: ${fmt.num(c.ordenes_compra_servicio, 0)}</span></div>`;
+    panel.innerHTML = `
+      <div class="alerta ${enPruebas ? 'alerta-aviso' : 'alerta-ok'} mb-3">Ahora mismo el sistema trabaja con <strong>${enPruebas ? 'el ENTORNO DE PRUEBAS (datos ficticios)' : 'los DATOS REALES (producción)'}</strong>.
+        El cambio aplica a todos los usuarios. Usuarios y tasas BCV son los mismos en ambos entornos.</div>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div class="tarjeta p-4 space-y-3">
+          <div class="flex items-center gap-2"><h2 class="font-semibold mr-auto">${ico('flask-conical', 'inline w-4 h-4')} Entorno de pruebas</h2>${enPruebas ? '<span class="pill pill-aviso">Activo</span>' : ''}</div>
+          ${e.existe_pruebas ? `${conteos(e.pruebas.conteos)}
+            <p class="text-sm">Creado el ${fmt.fechaHora(e.pruebas.creado_en)} por ${esc(e.pruebas.creado_por || '')} · <a href="${esc(e.pruebas.url)}" target="_blank" rel="noopener">abrir su hoja</a></p>`
+            : '<p class="text-sm">Crea una base aparte con 12 beneficiarios ficticios (6 con errores de tipeo en cédula/RIF o cuenta) y 10 pagos de los dos meses anteriores, de categorías distintas y sin órdenes generadas. Los PDF van a una carpeta "ENTORNO DE PRUEBAS" en Drive.</p>'}
+          <div class="flex flex-wrap gap-2">
+            ${!e.existe_pruebas ? `<button class="btn btn-prim" id="ent-crear">${ico('flask-conical')} Crear entorno de pruebas</button>` : ''}
+            ${e.existe_pruebas && !enPruebas ? `<button class="btn btn-prim" id="ent-ir">Usar el entorno de pruebas</button>` : ''}
+            ${e.existe_pruebas ? `<button class="btn" id="ent-reiniciar">${ico('rotate-ccw')} Reiniciar datos de prueba</button>` : ''}
+          </div>
+        </div>
+        <div class="tarjeta p-4 space-y-3">
+          <div class="flex items-center gap-2"><h2 class="font-semibold mr-auto">Datos reales (producción)</h2>${!enPruebas ? '<span class="pill pill-ok">Activo</span>' : ''}</div>
+          ${conteos(e.produccion.conteos)}
+          <p class="suave text-sm">Las pruebas nunca escriben aquí.</p>
+          <div class="flex flex-wrap gap-2">
+            ${enPruebas ? '<button class="btn" id="ent-prod">Ver datos reales (sin borrar las pruebas)</button>' : ''}
+            ${e.existe_pruebas ? `<button class="btn btn-peligro" id="ent-terminar">${ico('check')} Terminar pruebas y empezar con datos reales</button>` : ''}
+          </div>
+          ${e.produccion.conteos.pagos || e.produccion.conteos.beneficiarios ? `<p class="text-xs suave">Producción ya tiene registros. Si alguno fue de práctica, anúlelo (no se borra nada real).</p>` : ''}
+        </div>
+      </div>`;
+    const accion = async (btn, nombre, datos, mensaje, ruta) => {
+      ui.ocupado(btn, true);
+      try {
+        await api(nombre, datos, { escritura: true });
+        ui.toast(mensaje, 'exito');
+        setTimeout(() => App.recargarTodo(ruta), 600);
+      } catch (x) { ui.error(x); ui.ocupado(btn, false); }
+    };
+    const enlazar = (id, fn) => { const b = $(id, panel); if (b) b.addEventListener('click', (ev) => fn(ev.currentTarget)); };
+    const crear = async (btn, reinicio) => {
+      const ok = await ui.confirmarEscribiendo({
+        titulo: reinicio ? 'Reiniciar el entorno de pruebas' : 'Crear el entorno de pruebas',
+        mensaje: `<p>${reinicio ? 'Todo lo que hizo en pruebas (pagos, órdenes, PDF de prueba) se reemplaza por los datos ficticios iniciales. La hoja anterior de pruebas va a la papelera de Drive.' : 'Se creará una base de datos de práctica con datos ficticios.'}</p>
+          <p class="mt-2">El sistema quedará en <strong>modo pruebas para todos los usuarios</strong> hasta que vuelva a producción. Los datos reales no se tocan.</p>`,
+        palabra: 'PRUEBAS', textoBoton: reinicio ? 'Reiniciar' : 'Crear'
+      });
+      if (ok) accion(btn, 'entorno.crear', { confirmacion: 'PRUEBAS' }, 'Entorno de pruebas listo con datos ficticios.', '#/pagos?anio=&mes=');
+    };
+    enlazar('#ent-crear', (btn) => crear(btn, false));
+    enlazar('#ent-reiniciar', (btn) => crear(btn, true));
+    enlazar('#ent-ir', (btn) => accion(btn, 'entorno.cambiar', { destino: 'PRUEBAS' }, 'Ahora trabaja en el entorno de pruebas.', '#/pagos?anio=&mes='));
+    enlazar('#ent-prod', (btn) => accion(btn, 'entorno.cambiar', { destino: 'PRODUCCION' }, 'Ahora trabaja con los datos reales.', '#/panel'));
+    enlazar('#ent-terminar', async (btn) => {
+      const ok = await ui.confirmarEscribiendo({
+        titulo: 'Terminar pruebas y empezar con datos reales',
+        mensaje: `<p>Se elimina el entorno de pruebas: su hoja va a la papelera de Drive (recuperable durante 30 días) y el sistema queda trabajando con los datos reales.</p>
+          <p class="mt-2">Producción tiene hoy ${fmt.num(e.produccion.conteos.pagos, 0)} pago(s) y ${fmt.num(e.produccion.conteos.beneficiarios, 0)} beneficiario(s); no se modifican.</p>`,
+        palabra: 'REALES', textoBoton: 'Terminar pruebas', peligro: true
+      });
+      if (ok) accion(btn, 'entorno.eliminar', { confirmacion: 'REALES' }, 'Listo: ya puede cargar datos reales.', '#/panel');
     });
   }
 
@@ -1922,7 +2206,7 @@ const Admin = (() => {
   async function auditoria(panel) {
     const f = { texto: '', modulo: '', pagina: 1 };
     panel.innerHTML = `<div class="tarjeta p-3 mb-3 flex flex-wrap gap-2">
-        <select id="a-mod" class="campo" style="width:auto" aria-label="Módulo">${ui.opciones(['PAGOS', 'ORDEN_PAGO', 'ORDEN_COMPRA', 'CONCILIACION', 'BENEFICIARIOS', 'TASAS', 'ADMIN', 'SISTEMA'], '', 'Todos los módulos')}</select>
+        <select id="a-mod" class="campo" style="width:auto" aria-label="Módulo">${ui.opciones(['PAGOS', 'ORDEN_PAGO', 'ORDEN_COMPRA', 'CONCILIACION', 'BENEFICIARIOS', 'TASAS', 'ADMIN', 'SISTEMA', 'ENTORNO'], '', 'Todos los módulos')}</select>
         <input id="a-txt" class="campo flex-1 min-w-[200px]" placeholder="Buscar usuario, acción, número…" aria-label="Buscar en auditoría"></div>
       <div class="tarjeta"><div id="a-tabla" class="tabla-env"></div><div id="a-pag"></div></div>`;
     const cargar = async () => {

@@ -8,7 +8,7 @@
 
 const APP = {
   nombre: 'ERP Guanipa · Órdenes',
-  version: '1.0.5-beta',
+  version: '1.0.6-beta',
   zona: 'America/Caracas',
   nombreLibro: 'ERP Guanipa - Base de Datos',
   nombreCarpetaRaiz: 'ERP Guanipa - Documentos'
@@ -308,7 +308,7 @@ function mayusculas(s) {
   return String(s || '').replace(/\s+/g, ' ').trim().toUpperCase();
 }
 
-/** Deja solo dígitos y quita ceros a la izquierda. */
+/** Deja solo dígitos y quita ceros a la izquierda (para buscar y comparar). */
 function limpiarDocumento(doc) {
   const d = String(doc === null || doc === undefined ? '' : doc).replace(/\D/g, '').replace(/^0+/, '');
   return d;
@@ -319,9 +319,61 @@ function normalizarTipoDoc(tipo) {
   return ['V', 'E', 'J', 'G', 'P', 'C'].indexOf(t) > -1 ? t : '';
 }
 
-function documentoConPuntos(doc) {
+function esRif(tipo) {
+  return ['J', 'G', 'C'].indexOf(normalizarTipoDoc(tipo)) > -1;
+}
+
+/** Forma de guardar: la cédula sin ceros a la izquierda; el RIF conserva sus 9 dígitos (con dígito verificador). */
+function normalizarDocumento(tipo, doc) {
+  let d = soloDigitos(doc);
+  if (esRif(tipo)) {
+    while (d.length > 9 && d.charAt(0) === '0') d = d.substring(1);
+    return d;
+  }
+  return d.replace(/^0+/, '');
+}
+
+/** Reglas: cédula V/E de 6 a 8 dígitos; RIF J/G/C de 9 dígitos; pasaporte de 5 a 12. */
+function estadoDocumento(tipo, doc) {
+  const t = normalizarTipoDoc(tipo);
+  const d = normalizarDocumento(t, doc);
+  if (!d) return 'INCOMPLETO (SIN DOCUMENTO)';
+  if (!t) return 'ERROR (FALTA EL TIPO V/E/J/G)';
+  if (t === 'V' || t === 'E') return d.length >= 6 && d.length <= 8 ? 'VÁLIDO' : `ERROR (CÉDULA DE ${d.length} DÍG.: DEBE TENER 6 A 8)`;
+  if (esRif(t)) return d.length === 9 ? 'VÁLIDO' : `ERROR (RIF DE ${d.length} DÍG.: DEBE TENER 9)`;
+  return d.length >= 5 && d.length <= 12 ? 'VÁLIDO' : `ERROR (PASAPORTE DE ${d.length} DÍG.)`;
+}
+
+/**
+ * Compara documentos tolerando que el banco envíe el RIF sin dígito verificador (8 dígitos)
+ * y el registro lo tenga completo (9), o al revés.
+ */
+function mismoDocumento(tipoA, docA, tipoB, docB) {
+  const a = limpiarDocumento(docA);
+  const b = limpiarDocumento(docB);
+  if (!a || !b) return false;
+  if (a === b) return true;
+  if (!esRif(tipoA) && !esRif(tipoB)) return false;
+  const da = soloDigitos(docA);
+  const db = soloDigitos(docB);
+  if (da.length === 9 && db.length <= 8) return limpiarDocumento(da.substring(0, 8)) === b;
+  if (db.length === 9 && da.length <= 8) return limpiarDocumento(db.substring(0, 8)) === a;
+  return false;
+}
+
+/** Cédula: 12.345.678 · RIF de 9 dígitos: 30648928-2 */
+/** Clave para comparar documentos en mapas: el RIF se compara sin dígito verificador. */
+function claveDocumento(tipo, doc) {
+  const t = normalizarTipoDoc(tipo);
   const d = limpiarDocumento(doc);
-  return d ? d.replace(/\B(?=(\d{3})+(?!\d))/g, '.') : '';
+  return t + (esRif(t) && soloDigitos(doc).replace(/^0+/, '').length === 9 ? d.substring(0, 8) : d);
+}
+
+function documentoConPuntos(doc, tipo) {
+  const d = tipo && esRif(tipo) ? normalizarDocumento(tipo, doc) : limpiarDocumento(doc);
+  if (!d) return '';
+  if (tipo && esRif(tipo) && d.length === 9) return `${d.substring(0, 8)}-${d.substring(8)}`;
+  return d.replace(/\B(?=(\d{3})+(?!\d))/g, '.');
 }
 
 function soloDigitos(s) {
@@ -338,11 +390,13 @@ function estadoCuenta(cuenta) {
   const d = soloDigitos(cuenta);
   if (!d) return 'INCOMPLETO (SIN CUENTA)';
   if (d.length !== 20) return `ERROR (LONGITUD ${d.length} DÍG.)`;
+  if (!BANCOS[d.substring(0, 4)]) return `ERROR (BANCO ${d.substring(0, 4)} NO EXISTE)`;
   return 'VÁLIDO';
 }
 
 function cuentaValida(cuenta) {
-  return soloDigitos(cuenta).length === 20;
+  const d = soloDigitos(cuenta);
+  return d.length === 20 && !!BANCOS[d.substring(0, 4)];
 }
 
 function codigoBanco(cuenta) {
@@ -386,7 +440,7 @@ function copiar(obj) {
  * Módulo: Capa de datos (db.*). Toda la lógica pasa por aquí; nadie llama a SpreadsheetApp directo.
  * Al migrar a PostgreSQL solo se reescribe este archivo manteniendo la misma interfaz.
  * Sistema: ERP Alcaldía de Guanipa · Módulo de Órdenes
- * Versión: 1.0.2-beta
+ * Versión: 1.0.6-beta
  * © 2026 Soluciones AFFINITY. Todos los derechos reservados.
  */
 
@@ -435,24 +489,70 @@ const ESQUEMA = {
 
 const COLUMNAS_AUDITORIA = [['creado_en', 't'], ['creado_por', 't'], ['actualizado_en', 't'], ['actualizado_por', 't']];
 
+/** Tablas que viven siempre en la base de producción, aunque el entorno de pruebas esté activo. */
+const TABLAS_COMUNES = ['Usuarios', 'Tasas'];
+const ENTORNO_PRODUCCION = 'PRODUCCION';
+const ENTORNO_PRUEBAS = 'PRUEBAS';
+
 const db = (() => {
-  let libroActual = null;
+  let entorno = null;
+  const libros = {};
   const memo = {};
   const cabeceras = {};
   let profundidadBloqueo = 0;
 
-  function libro() {
-    if (libroActual) return libroActual;
-    const id = PropertiesService.getScriptProperties().getProperty('DB_ID');
-    if (!id) throw new ErrorApp('El sistema no está instalado. Ejecute la función instalar() en el editor de Apps Script.', 'NO_INSTALADO');
-    libroActual = SpreadsheetApp.openById(id);
-    return libroActual;
+  function entornoActivo() {
+    if (entorno) return entorno;
+    const props = PropertiesService.getScriptProperties();
+    entorno = props.getProperty('ENTORNO') === ENTORNO_PRUEBAS && props.getProperty('DB_ID_PRUEBAS') ? ENTORNO_PRUEBAS : ENTORNO_PRODUCCION;
+    return entorno;
   }
 
-  function usarLibro(ss) {
-    libroActual = ss;
+  function abrir(nombreEntorno) {
+    if (libros[nombreEntorno]) return libros[nombreEntorno];
+    const clave = nombreEntorno === ENTORNO_PRUEBAS ? 'DB_ID_PRUEBAS' : 'DB_ID';
+    const id = PropertiesService.getScriptProperties().getProperty(clave);
+    if (!id) {
+      if (nombreEntorno === ENTORNO_PRUEBAS) throw new ErrorApp('El entorno de pruebas no existe. Créelo desde Administración › Entorno.', 'SIN_ENTORNO');
+      throw new ErrorApp('El sistema no está instalado. Ejecute la función instalar() en el editor de Apps Script.', 'NO_INSTALADO');
+    }
+    libros[nombreEntorno] = SpreadsheetApp.openById(id);
+    return libros[nombreEntorno];
+  }
+
+  function entornoDeTabla(tabla) {
+    return TABLAS_COMUNES.indexOf(tabla) > -1 ? ENTORNO_PRODUCCION : entornoActivo();
+  }
+
+  function libro(tabla) {
+    return abrir(tabla ? entornoDeTabla(tabla) : entornoActivo());
+  }
+
+  function olvidarPropias() {
+    Object.keys(memo).concat(Object.keys(cabeceras)).forEach((k) => {
+      if (TABLAS_COMUNES.indexOf(k) === -1) { delete memo[k]; delete cabeceras[k]; }
+    });
+  }
+
+  /** Olvida entorno y libros abiertos (equivale a empezar una ejecución nueva). */
+  function olvidarEntorno() {
+    entorno = null;
+    Object.keys(libros).forEach((k) => delete libros[k]);
     Object.keys(memo).forEach((k) => delete memo[k]);
     Object.keys(cabeceras).forEach((k) => delete cabeceras[k]);
+  }
+
+  /** Cambia el entorno solo para esta ejecución (no toca la propiedad ENTORNO). */
+  function usarEntorno(nombre) {
+    entorno = nombre === ENTORNO_PRUEBAS ? ENTORNO_PRUEBAS : ENTORNO_PRODUCCION;
+    olvidarPropias();
+  }
+
+  function usarLibro(ss, nombreEntorno) {
+    const e = nombreEntorno || ENTORNO_PRODUCCION;
+    libros[e] = ss;
+    if (e === ENTORNO_PRODUCCION) { Object.keys(memo).forEach((k) => delete memo[k]); Object.keys(cabeceras).forEach((k) => delete cabeceras[k]); }
+    else olvidarPropias();
   }
 
   function definicion(tabla) {
@@ -475,7 +575,7 @@ const db = (() => {
   }
 
   function hoja(tabla) {
-    const ss = libro();
+    const ss = libro(tabla);
     let h = ss.getSheetByName(tabla);
     if (!h) h = crearHoja(ss, tabla);
     if (!cabeceras[tabla]) cabeceras[tabla] = asegurarColumnas(h, tabla);
@@ -683,20 +783,23 @@ const db = (() => {
 
   return {
     leer, porId, buscar, primero, insertar, insertarLote, actualizar, actualizarLote,
-    limpiar, conBloqueo, olvidar, prepararTablas, idLibro, usarLibro
+    limpiar, conBloqueo, olvidar, prepararTablas, idLibro, usarLibro, usarEntorno, olvidarEntorno,
+    entorno: entornoActivo, libroDeTabla: libro
   };
 })();
 
 /* ---------- Configuración clave/valor con caché ---------- */
 
 const config = (() => {
-  const CLAVE_CACHE = 'cfg_v1';
   let local = null;
+  let entornoLocal = null;
+  const claveCache = () => 'cfg_v1_' + db.entorno();
 
   function todo() {
-    if (local) return local;
+    if (local && entornoLocal === db.entorno()) return local;
+    entornoLocal = db.entorno();
     const cache = CacheService.getScriptCache();
-    const guardado = cache.get(CLAVE_CACHE);
+    const guardado = cache.get(claveCache());
     if (guardado) {
       local = JSON.parse(guardado);
       return local;
@@ -706,7 +809,7 @@ const config = (() => {
     db.leer('Config').forEach((r) => { if (r.clave) resultado[r.clave] = r.valor; });
     local = resultado;
     const texto = JSON.stringify(resultado);
-    if (texto.length < 90000) cache.put(CLAVE_CACHE, texto, 600);
+    if (texto.length < 90000) cache.put(claveCache(), texto, 600);
     return local;
   }
 
@@ -724,7 +827,7 @@ const config = (() => {
 
   function invalidar() {
     local = null;
-    CacheService.getScriptCache().remove(CLAVE_CACHE);
+    CacheService.getScriptCache().remove(claveCache());
   }
 
   /** Reserva números consecutivos; debe llamarse dentro de db.conBloqueo. */
@@ -856,7 +959,7 @@ function recortarDetalle(detalle) {
 /**
  * Módulo: API (punto de entrada web). Recibe {accion, datos, token} por POST y responde JSON.
  * Sistema: ERP Alcaldía de Guanipa · Módulo de Órdenes
- * Versión: 1.0.2-beta
+ * Versión: 1.0.6-beta
  * © 2026 Soluciones AFFINITY. Todos los derechos reservados.
  */
 
@@ -876,6 +979,7 @@ function rutasApi() {
     'conciliacion.analizar': { fn: conciliacionAnalizar, permiso: 'pagos.importar' },
     'conciliacion.confirmar': { fn: conciliacionConfirmar, permiso: 'pagos.importar', escritura: true },
     'conciliacion.historial': { fn: conciliacionHistorial, permiso: 'ver' },
+    'conciliacion.ejemplo': { fn: conciliacionEjemplo, permiso: 'pagos.importar' },
 
     'op.calcular': { fn: opCalcular, permiso: 'ver' },
     'op.guardar': { fn: opGuardar, permiso: 'op.generar', escritura: true },
@@ -894,6 +998,7 @@ function rutasApi() {
     'beneficiarios.listar': { fn: beneficiariosListar, permiso: 'ver' },
     'beneficiarios.buscar': { fn: beneficiariosBuscar, permiso: 'ver' },
     'beneficiarios.guardar': { fn: beneficiariosGuardar, permiso: 'beneficiarios.editar', escritura: true },
+    'beneficiarios.detalle': { fn: beneficiariosDetalle, permiso: 'ver' },
 
     'tasas.listar': { fn: tasasListar, permiso: 'ver' },
     'tasas.consultar': { fn: tasasConsultar, permiso: 'ver' },
@@ -909,7 +1014,12 @@ function rutasApi() {
     'admin.auditoria': { fn: adminAuditoria, permiso: 'admin' },
     'admin.estado': { fn: adminEstado, permiso: 'admin' },
     'admin.migrar': { fn: adminMigrar, permiso: 'admin', escritura: true },
-    'admin.respaldar': { fn: adminRespaldar, permiso: 'admin', escritura: true }
+    'admin.respaldar': { fn: adminRespaldar, permiso: 'admin', escritura: true },
+
+    'entorno.estado': { fn: entornoEstadoApi, permiso: 'admin' },
+    'entorno.crear': { fn: entornoCrearApi, permiso: 'admin', escritura: true },
+    'entorno.cambiar': { fn: entornoCambiarApi, permiso: 'admin', escritura: true },
+    'entorno.eliminar': { fn: entornoEliminarApi, permiso: 'admin', escritura: true }
   };
 }
 
@@ -990,7 +1100,7 @@ function sesionIniciar(datos, usuario) {
       rol_nombre: ROLES[usuario.rol] ? ROLES[usuario.rol].nombre : usuario.rol,
       direccion: usuario.direccion, permisos: permisosDeRol(usuario.rol)
     },
-    sistema: { nombre: APP.nombre, version: APP.version },
+    sistema: { nombre: APP.nombre, version: APP.version, entorno: db.entorno() },
     catalogos: {
       categorias: cfg.categorias,
       unidades: cfg.unidades,
@@ -1305,6 +1415,15 @@ function disparadorTasaBCV() {
   } catch (e) {
     console.error('Disparador de tasa BCV falló: ' + e.message);
   }
+  // Las tasas son comunes; los pagos sin tasa del otro entorno también se completan.
+  const otro = db.entorno() === ENTORNO_PRUEBAS ? ENTORNO_PRODUCCION : ENTORNO_PRUEBAS;
+  if (otro === ENTORNO_PRUEBAS && !PropertiesService.getScriptProperties().getProperty('DB_ID_PRUEBAS')) return;
+  try {
+    db.usarEntorno(otro);
+    db.conBloqueo(() => completarTasasPendientes('sistema'));
+  } catch (e) {
+    console.error(`Completar tasas en ${otro} falló: ${e.message}`);
+  }
 }
 
 /** Asigna tasa y monto en USD a pagos y órdenes que se registraron antes de tener la tasa del día. */
@@ -1426,8 +1545,10 @@ function tasasImportarHistoricoApi(datos, usuario) {
 /* ===================== 11_Beneficiarios.gs ===================== */
 /**
  * Módulo: Beneficiarios y proveedores. Un registro por tipo + número de documento.
+ * Reglas: cédula V/E de 6 a 8 dígitos, RIF J/G/C de 9 dígitos, cuenta de 20 dígitos de un banco existente.
+ * Los datos con errores se guardan marcados (vienen de migraciones y conciliaciones) y salen primero en la lista.
  * Sistema: ERP Alcaldía de Guanipa · Módulo de Órdenes
- * Versión: 1.0.2-beta
+ * Versión: 1.0.6-beta
  * © 2026 Soluciones AFFINITY. Todos los derechos reservados.
  */
 
@@ -1435,42 +1556,46 @@ function claveBeneficiario(tipo, documento) {
   return normalizarTipoDoc(tipo) + limpiarDocumento(documento);
 }
 
+/** Lista de problemas de datos del beneficiario (vacía si todo está bien). */
+function problemasBeneficiario(b) {
+  const lista = [];
+  const doc = estadoDocumento(b.tipo_doc, b.documento);
+  const cta = estadoCuenta(b.cuenta);
+  if (doc !== 'VÁLIDO') lista.push('Documento: ' + doc.replace(/^ERROR \(|^INCOMPLETO \(|\)$/g, '').toLowerCase());
+  if (cta !== 'VÁLIDO') lista.push('Cuenta: ' + cta.replace(/^ERROR \(|^INCOMPLETO \(|\)$/g, '').toLowerCase());
+  return lista;
+}
+
 /**
- * Busca por tipo + documento. Si no aparece, prueba solo el número y, para RIF de 9 dígitos
- * (con dígito verificador, como llegan de otros bancos), prueba los primeros 8.
+ * Busca por tipo + documento. Tolera RIF con o sin dígito verificador y, si el tipo no viene
+ * (o viene una letra no estándar), busca solo por número cuando hay un único candidato.
  */
 function buscarBeneficiario(tipo, documento) {
-  const doc = limpiarDocumento(documento);
-  if (!doc) return null;
+  if (!limpiarDocumento(documento)) return null;
   const t = normalizarTipoDoc(tipo);
   const lista = db.leer('Beneficiarios');
-  const exacto = lista.find((b) => b.tipo_doc === t && limpiarDocumento(b.documento) === doc);
-  if (exacto) return exacto;
-  const soloNumero = lista.filter((b) => limpiarDocumento(b.documento) === doc);
-  if (soloNumero.length === 1) return soloNumero[0];
-  if (doc.length === 9 && (t === 'J' || t === 'G')) {
-    const sinVerificador = doc.substring(0, 8);
-    return lista.find((b) => b.tipo_doc === t && limpiarDocumento(b.documento) === sinVerificador) || null;
+  const mismoTipo = lista.filter((b) => b.tipo_doc === t && mismoDocumento(t, documento, b.tipo_doc, b.documento));
+  if (mismoTipo.length) {
+    const exacto = mismoTipo.find((b) => limpiarDocumento(b.documento) === limpiarDocumento(documento));
+    return exacto || mismoTipo[0];
   }
-  return null;
+  const porNumero = lista.filter((b) => mismoDocumento(t || b.tipo_doc, documento, b.tipo_doc, b.documento));
+  return porNumero.length === 1 ? porNumero[0] : null;
 }
 
 function validarBeneficiario(datos) {
   const tipo = normalizarTipoDoc(datos.tipo_doc);
-  const documento = limpiarDocumento(datos.documento);
+  const documento = normalizarDocumento(tipo, datos.documento);
   const nombre = normalizarNombre(datos.nombre);
   if (!tipo) throw new ErrorApp('Seleccione el tipo de documento (V, E, J, G o P).', 'VALIDACION');
-  if (!documento || documento.length < 5 || documento.length > 10) throw new ErrorApp('El número de documento debe tener entre 5 y 10 dígitos.', 'VALIDACION');
+  if (!documento) throw new ErrorApp('Indique el número de cédula o RIF.', 'VALIDACION');
   if (nombre.length < 3) throw new ErrorApp('Indique el nombre o razón social.', 'VALIDACION');
   const cuentaDigitos = soloDigitos(datos.cuenta);
-  if (cuentaDigitos && cuentaDigitos.length !== 20) {
-    throw new ErrorApp(`El número de cuenta debe tener 20 dígitos (tiene ${cuentaDigitos.length}).`, 'VALIDACION');
-  }
   return {
     tipo_doc: tipo,
     documento,
     nombre,
-    cuenta: cuentaDigitos ? formatearCuenta(cuentaDigitos) : '',
+    cuenta: cuentaDigitos.length === 20 ? formatearCuenta(cuentaDigitos) : cuentaDigitos,
     banco_codigo: codigoBanco(cuentaDigitos),
     banco: cuentaDigitos ? nombreBanco(cuentaDigitos) : '',
     estado_cuenta: estadoCuenta(cuentaDigitos),
@@ -1480,28 +1605,29 @@ function validarBeneficiario(datos) {
   };
 }
 
-/** Crea o actualiza el beneficiario a partir de los datos de un pago. No pisa datos válidos con vacíos. */
+/** Crea o actualiza el beneficiario a partir de un pago. No pisa datos válidos con datos peores. */
 function sincronizarBeneficiarioDesdePago(pago, usuario) {
   const tipo = normalizarTipoDoc(pago.tipo_doc);
-  const doc = limpiarDocumento(pago.documento);
+  const doc = normalizarDocumento(tipo, pago.documento);
   const nombre = normalizarNombre(pago.beneficiario);
   if (!tipo || !doc || nombre.length < 3) return null;
   const cuenta = soloDigitos(pago.cuenta);
-  const existente = buscarBeneficiario(tipo, doc);
+  const porId = pago.beneficiario_id ? db.porId('Beneficiarios', pago.beneficiario_id) : null;
+  const existente = porId || buscarBeneficiario(tipo, doc);
   if (!existente) {
     return db.insertar('Beneficiarios', {
       tipo_doc: tipo, documento: doc, nombre,
-      cuenta: cuenta ? formatearCuenta(cuenta) : '',
+      cuenta: cuenta.length === 20 ? formatearCuenta(cuenta) : cuenta,
       banco_codigo: codigoBanco(cuenta), banco: cuenta ? nombreBanco(cuenta) : '',
       estado_cuenta: estadoCuenta(cuenta), alias: '', activo: true
     }, usuario);
   }
   const cambios = {};
-  if (cuenta.length === 20 && soloDigitos(existente.cuenta) !== cuenta) {
-    Object.assign(cambios, {
-      cuenta: formatearCuenta(cuenta), banco_codigo: codigoBanco(cuenta),
-      banco: nombreBanco(cuenta), estado_cuenta: 'VÁLIDO'
-    });
+  if (cuentaValida(cuenta) && soloDigitos(existente.cuenta) !== cuenta) {
+    Object.assign(cambios, { cuenta: formatearCuenta(cuenta), banco_codigo: codigoBanco(cuenta), banco: nombreBanco(cuenta), estado_cuenta: 'VÁLIDO' });
+  }
+  if (estadoDocumento(tipo, doc) === 'VÁLIDO' && estadoDocumento(existente.tipo_doc, existente.documento) !== 'VÁLIDO') {
+    cambios.documento = doc;
   }
   if (nombre && normalizarTexto(existente.nombre) !== normalizarTexto(nombre)) {
     const alias = String(existente.alias || '').split('|').filter(Boolean);
@@ -1521,64 +1647,142 @@ function categoriaSugerida(tipo, documento) {
     memoCategorias = {};
     const fechas = {};
     db.leer('Pagos').forEach((p) => {
-      const d = limpiarDocumento(p.documento);
-      if (!d || !p.categoria || p.estado === 'ANULADA') return;
-      if (!fechas[d] || p.fecha >= fechas[d]) { fechas[d] = p.fecha; memoCategorias[d] = p.categoria; }
+      if (!p.categoria || p.estado === 'ANULADA') return;
+      const d = soloDigitos(p.documento);
+      const claves = [limpiarDocumento(d)];
+      if (esRif(p.tipo_doc) && d.length === 9) claves.push(limpiarDocumento(d.substring(0, 8)));
+      claves.forEach((k) => {
+        if (!k) return;
+        if (!fechas[k] || p.fecha >= fechas[k]) { fechas[k] = p.fecha; memoCategorias[k] = p.categoria; }
+      });
     });
   }
-  return memoCategorias[doc] || '';
+  const d = soloDigitos(documento);
+  return memoCategorias[doc] || (esRif(tipo) && d.length === 9 ? memoCategorias[limpiarDocumento(d.substring(0, 8))] || '' : '');
+}
+
+function pagosDeBeneficiario(b) {
+  return db.leer('Pagos').filter((p) => p.beneficiario_id === b.id || mismoDocumento(p.tipo_doc, p.documento, b.tipo_doc, b.documento));
+}
+
+function conProblemas(b) {
+  return Object.assign(db.limpiar(b), {
+    estado_documento: estadoDocumento(b.tipo_doc, b.documento),
+    estado_cuenta: estadoCuenta(b.cuenta),
+    banco: soloDigitos(b.cuenta).length >= 4 ? nombreBanco(b.cuenta) : '',
+    problemas: problemasBeneficiario(b)
+  });
 }
 
 /* ---------- API ---------- */
 
 function beneficiariosListar(datos) {
   const texto = normalizarTexto(datos.texto);
-  const estado = datos.estado_cuenta || '';
+  const estado = datos.estado_cuenta || datos.estado || '';
   const pagina = Math.max(1, Number(datos.pagina) || 1);
   const porPagina = Math.min(Math.max(10, Number(datos.por_pagina) || 50), 200);
-  let lista = db.leer('Beneficiarios').filter((b) => b.activo !== false);
+  const activos = db.leer('Beneficiarios').filter((b) => b.activo !== false).map(conProblemas);
+  let lista = activos;
   if (texto) {
     const digitos = texto.replace(/\D/g, '').replace(/^0+/, '');
     lista = lista.filter((b) => normalizarTexto(b.nombre + ' ' + b.alias).indexOf(texto) > -1 ||
       (digitos && limpiarDocumento(b.documento).indexOf(digitos) > -1));
   }
-  if (estado === 'VALIDO') lista = lista.filter((b) => b.estado_cuenta === 'VÁLIDO');
-  if (estado === 'PROBLEMA') lista = lista.filter((b) => b.estado_cuenta !== 'VÁLIDO');
-  lista.sort((a, b) => String(a.nombre).localeCompare(String(b.nombre), 'es'));
-  const total = lista.length;
+  if (estado === 'VALIDO') lista = lista.filter((b) => !b.problemas.length);
+  if (estado === 'PROBLEMA') lista = lista.filter((b) => b.problemas.length);
+  // Los registros con errores van primero para que se corrijan antes de usarlos.
+  lista.sort((a, b) => (b.problemas.length > 0) - (a.problemas.length > 0) || String(a.nombre).localeCompare(String(b.nombre), 'es'));
   return {
-    total, pagina, por_pagina: porPagina,
-    registros: lista.slice((pagina - 1) * porPagina, pagina * porPagina).map(db.limpiar),
-    con_problemas: db.leer('Beneficiarios').filter((b) => b.activo !== false && b.estado_cuenta !== 'VÁLIDO').length
+    total: lista.length, pagina, por_pagina: porPagina,
+    registros: lista.slice((pagina - 1) * porPagina, pagina * porPagina),
+    con_problemas: activos.filter((b) => b.problemas.length).length
   };
 }
 
 function beneficiariosBuscar(datos) {
   const texto = normalizarTexto(datos.texto);
+  const activos = db.leer('Beneficiarios').filter((b) => b.activo !== false);
+  const sugerir = (b) => Object.assign(conProblemas(b), { categoria_sugerida: categoriaSugerida(b.tipo_doc, b.documento) });
+  if (!texto) {
+    // Sin texto: los más pagados, para elegir rápido en el pago manual.
+    const usos = {};
+    db.leer('Pagos').forEach((p) => { if (p.beneficiario_id && p.estado !== ESTADO_ANULADA) usos[p.beneficiario_id] = (usos[p.beneficiario_id] || 0) + 1; });
+    return activos.slice().sort((a, b) => (usos[b.id] || 0) - (usos[a.id] || 0) || String(a.nombre).localeCompare(String(b.nombre), 'es'))
+      .slice(0, 12).map(sugerir);
+  }
   if (texto.length < 2) return [];
   const digitos = texto.replace(/\D/g, '').replace(/^0+/, '');
-  return db.leer('Beneficiarios')
-    .filter((b) => b.activo !== false && (normalizarTexto(b.nombre + ' ' + b.alias).indexOf(texto) > -1 ||
-      (digitos.length >= 3 && limpiarDocumento(b.documento).indexOf(digitos) === 0)))
+  return activos
+    .filter((b) => normalizarTexto(b.nombre + ' ' + b.alias).indexOf(texto) > -1 ||
+      (digitos.length >= 3 && limpiarDocumento(b.documento).indexOf(digitos) === 0))
     .slice(0, 12)
-    .map((b) => Object.assign(db.limpiar(b), { categoria_sugerida: categoriaSugerida(b.tipo_doc, b.documento) }));
+    .map(sugerir);
 }
 
 function beneficiariosGuardar(datos, usuario) {
   const limpio = validarBeneficiario(datos);
   return db.conBloqueo(() => {
     const duplicado = db.primero('Beneficiarios', (b) => b.tipo_doc === limpio.tipo_doc &&
-      limpiarDocumento(b.documento) === limpio.documento && b.id !== datos.id);
-    if (duplicado) throw new ErrorApp(`Ya existe un beneficiario con el documento ${limpio.tipo_doc}-${documentoConPuntos(limpio.documento)}: ${duplicado.nombre}.`, 'DUPLICADO');
+      mismoDocumento(b.tipo_doc, b.documento, limpio.tipo_doc, limpio.documento) && b.id !== datos.id);
+    if (duplicado) throw new ErrorApp(`Ya existe un beneficiario con el documento ${limpio.tipo_doc}-${documentoConPuntos(limpio.documento, limpio.tipo_doc)}: ${duplicado.nombre}.`, 'DUPLICADO');
+    let guardado;
     if (datos.id) {
       const r = db.actualizar('Beneficiarios', datos.id, Object.assign(limpio, { activo: datos.activo !== false }), usuario.email);
       auditar(usuario, 'BENEFICIARIOS', 'EDITAR', datos.id, diferencias(r.antes, r.despues));
-      return r.despues;
+      guardado = db.porId('Beneficiarios', datos.id);
+    } else {
+      guardado = db.insertar('Beneficiarios', Object.assign(limpio, { alias: '', activo: true }), usuario.email);
+      auditar(usuario, 'BENEFICIARIOS', 'CREAR', guardado.id, db.limpiar(guardado));
     }
-    const nuevo = db.insertar('Beneficiarios', Object.assign(limpio, { alias: '', activo: true }), usuario.email);
-    auditar(usuario, 'BENEFICIARIOS', 'CREAR', nuevo.id, db.limpiar(nuevo));
-    return db.limpiar(nuevo);
+    const resultado = conProblemas(guardado);
+    resultado.avisos = resultado.problemas;
+    return resultado;
   });
+}
+
+/** Ficha del beneficiario: cuánto se le ha pagado, por qué conceptos y con qué frecuencia. */
+function beneficiariosDetalle(datos) {
+  const b = db.porId('Beneficiarios', datos.id);
+  if (!b) throw new ErrorApp('No se encontró el beneficiario.', 'NO_ENCONTRADO');
+  const pagos = pagosDeBeneficiario(b).filter((p) => p.estado !== ESTADO_ANULADA)
+    .sort((x, y) => (x.fecha < y.fecha ? -1 : x.fecha > y.fecha ? 1 : (x.numero || 0) - (y.numero || 0)));
+  const total = redondear2(pagos.reduce((s, p) => s + (p.monto || 0), 0));
+  const totalUsd = redondear2(pagos.reduce((s, p) => s + (p.monto_usd || 0), 0));
+  const porCategoria = {};
+  const porMes = {};
+  pagos.forEach((p) => {
+    const c = p.categoria || 'Sin categoría';
+    const rc = porCategoria[c] = porCategoria[c] || { categoria: c, cantidad: 0, monto: 0, monto_usd: 0 };
+    rc.cantidad++; rc.monto += p.monto || 0; rc.monto_usd += p.monto_usd || 0;
+    const m = String(p.fecha).substring(0, 7);
+    const rm = porMes[m] = porMes[m] || { mes: m, cantidad: 0, monto: 0, monto_usd: 0 };
+    rm.cantidad++; rm.monto += p.monto || 0; rm.monto_usd += p.monto_usd || 0;
+  });
+  let diasEntrePagos = null;
+  if (pagos.length > 1) {
+    const ms = (f) => new Date(f + 'T12:00:00Z').getTime();
+    diasEntrePagos = Math.round((ms(pagos[pagos.length - 1].fecha) - ms(pagos[0].fecha)) / 864e5 / (pagos.length - 1));
+  }
+  const ordenes = db.leer('OrdenesCompra').filter((o) => o.estado !== ESTADO_ANULADA &&
+    (o.beneficiario_id === b.id || mismoDocumento(o.tipo_doc, o.documento, b.tipo_doc, b.documento)));
+  const redondear = (o) => Object.assign(o, { monto: redondear2(o.monto), monto_usd: redondear2(o.monto_usd) });
+  return {
+    beneficiario: conProblemas(b),
+    resumen: {
+      total_bs: total, total_usd: totalUsd, cantidad: pagos.length,
+      promedio_bs: pagos.length ? redondear2(total / pagos.length) : 0,
+      promedio_usd: pagos.length ? redondear2(totalUsd / pagos.length) : 0,
+      primer_pago: pagos.length ? pagos[0].fecha : null,
+      ultimo_pago: pagos.length ? pagos[pagos.length - 1].fecha : null,
+      dias_entre_pagos: diasEntrePagos,
+      op_generadas: pagos.filter((p) => p.op_generada === true).length,
+      ordenes_compra_servicio: ordenes.length,
+      monto_ordenes: redondear2(ordenes.reduce((s, o) => s + (o.total_final || 0), 0))
+    },
+    por_categoria: Object.keys(porCategoria).map((k) => redondear(porCategoria[k])).sort((x, y) => y.monto - x.monto),
+    por_mes: Object.keys(porMes).sort().map((k) => redondear(porMes[k])),
+    ultimos_pagos: pagos.slice(-20).reverse().map(resumenPago)
+  };
 }
 
 
@@ -1697,7 +1901,7 @@ function normalizarEntradaPago(datos, esAdmin) {
   const normalizadores = {
     beneficiario: (v) => normalizarNombre(v).substring(0, 200),
     tipo_doc: normalizarTipoDoc,
-    documento: limpiarDocumento,
+    documento: (v) => normalizarDocumento(datos.tipo_doc, v),
     categoria: (v) => textoSeguro(v, 120),
     descripcion: (v) => mayusculas(v).substring(0, 1000),
     cuenta: soloDigitos
@@ -1903,16 +2107,23 @@ function detectarColumnasConciliacion(filas) {
  *   PAGO A PROVEEDORES OTROS BANCOS 0174 J400000029   (código del banco destino + RIF con dígito verificador)
  *   PAGO DE NOMINA
  */
+/** El BDV rellena a 9 dígitos con ceros a la izquierda y no incluye el dígito verificador del RIF. */
+function documentoBdv(tipo, digitos) {
+  const d = soloDigitos(digitos);
+  const sinRelleno = d.length === 9 && d.charAt(0) === '0' ? d.substring(1) : d;
+  return esRif(tipo) ? sinRelleno.replace(/^0+(?=\d{8})/, '') : limpiarDocumento(sinRelleno);
+}
+
 function interpretarDescripcionBancaria(descripcion) {
   const d = normalizarTexto(descripcion);
   const vacio = { tipo_mov: 'OTRO', banco_codigo: '', tipo_doc: '', documento: '', lote: '' };
   let m = d.match(/OTROS BANCOS\s+(\d{4})\s+([A-Z])?[- ]?(\d{5,10})\b/);
-  if (m) return { tipo_mov: 'PROVEEDOR', banco_codigo: m[1], tipo_doc: normalizarTipoDoc(m[2]), documento: limpiarDocumento(m[3]), lote: '' };
+  if (m) return { tipo_mov: 'PROVEEDOR', banco_codigo: m[1], tipo_doc: normalizarTipoDoc(m[2]), documento: normalizarDocumento(m[2], m[3]), lote: '' };
   m = d.match(/\bBDV\s+([A-Z])?[- ]?(\d{5,10})\b(?:.*?\bLOTE\s*(\d+))?/);
-  if (m) return { tipo_mov: 'PROVEEDOR', banco_codigo: '0102', tipo_doc: normalizarTipoDoc(m[1]), documento: limpiarDocumento(m[2]), lote: m[3] || '' };
+  if (m) return { tipo_mov: 'PROVEEDOR', banco_codigo: '0102', tipo_doc: normalizarTipoDoc(m[1]), documento: documentoBdv(m[1], m[2]), lote: m[3] || '' };
   if (/NOMINA/.test(d)) return Object.assign({}, vacio, { tipo_mov: 'NOMINA' });
   m = d.match(/\b([VEJGP])[- ]?(\d{6,10})\b/);
-  if (m) return { tipo_mov: 'PROVEEDOR', banco_codigo: '', tipo_doc: m[1], documento: limpiarDocumento(m[2]), lote: '' };
+  if (m) return { tipo_mov: 'PROVEEDOR', banco_codigo: '', tipo_doc: m[1], documento: normalizarDocumento(m[1], m[2]), lote: '' };
   return vacio;
 }
 
@@ -1982,7 +2193,7 @@ function enriquecerMovimiento(mov, contexto) {
   }
   if (r.estado === 'NUEVO' && info.documento) {
     const parecido = contexto.porFechaMonto[`${mov.fecha}|${mov.monto.toFixed(2)}`];
-    if (parecido && parecido.some((p) => limpiarDocumento(p.documento) === info.documento || !p.documento)) {
+    if (parecido && parecido.some((p) => mismoDocumento(p.tipo_doc, p.documento, info.tipo_doc, info.documento) || !p.documento)) {
       r.estado = 'POSIBLE_DUPLICADO';
       r.observaciones.push(`Ya existe un pago del ${fechaVE(mov.fecha)} por el mismo monto (N° ${parecido.map((p) => p.numero).join(', ')})`);
     }
@@ -2001,7 +2212,7 @@ function contextoImportacion() {
     if (p.clave_conciliacion) claves[p.clave_conciliacion] = p.numero;
     if (p.estado === ESTADO_ANULADA) return;
     const k = `${p.fecha}|${Number(p.monto).toFixed(2)}`;
-    (porFechaMonto[k] = porFechaMonto[k] || []).push({ numero: p.numero, documento: p.documento });
+    (porFechaMonto[k] = porFechaMonto[k] || []).push({ numero: p.numero, tipo_doc: p.tipo_doc, documento: p.documento });
   });
   return { claves, porFechaMonto, nombreNomina: config.obtener('beneficiario_nomina') || 'PAGO DE NÓMINA' };
 }
@@ -2200,7 +2411,7 @@ function datosPlantillaOP(pago) {
     monto: pago.monto,
     beneficiario: pago.beneficiario,
     tipo_doc: pago.tipo_doc,
-    documento: limpiarDocumento(pago.documento),
+    documento: normalizarDocumento(pago.tipo_doc, pago.documento),
     contrato: pago.op_contrato || '',
     orden_compra: oc ? textoOrdenVinculada(oc) : '',
     orden_compra_monto: oc ? oc.total_final : null,
@@ -2348,7 +2559,7 @@ function construirOrden(datos, usuario, actual) {
   if (!TIPOS_ORDEN[tipo]) throw new ErrorApp('Indique si es Orden de Compra u Orden de Servicio.', 'VALIDACION');
   const fecha = aFechaISO(datos.fecha) || hoyISO();
   const tipoDoc = normalizarTipoDoc(datos.tipo_doc);
-  const documento = limpiarDocumento(datos.documento);
+  const documento = normalizarDocumento(tipoDoc, datos.documento);
   const beneficiario = normalizarNombre(datos.beneficiario).substring(0, 200);
   if (!beneficiario) throw new ErrorApp('Indique el proveedor o beneficiario.', 'VALIDACION');
   if (!tipoDoc || !documento) throw new ErrorApp('Indique el RIF o cédula del proveedor.', 'VALIDACION');
@@ -2794,7 +3005,7 @@ function plantillaOrdenCompra(d) {
   filas.push(seccion('INFORMACIÓN GENERAL', 8.5));
   const info = (lbl, val, alto, estilo) => fila([celda(lbl, { cs: 4, c: 'lbl' }), celda(val, { cs: 9, c: 'val', s: estilo || '' })], alto);
   filas.push(info('NOMBRE DE LA EMPRESA, BENEFICIARIO O PROVEEDOR', e(d.beneficiario), 13));
-  filas.push(info('R.I.F. DE LA EMPRESA Y/O PROVEEDOR | C.I. DEL<br>BENEFICIARIO', e(`${d.tipo_doc || ''} ${documentoConPuntos(d.documento)}`.trim()), 15));
+  filas.push(info('R.I.F. DE LA EMPRESA Y/O PROVEEDOR | C.I. DEL<br>BENEFICIARIO', e(`${d.tipo_doc || ''} ${documentoConPuntos(d.documento, d.tipo_doc)}`.trim()), 15));
   filas.push(info('NÚMERO DE PROCESO', e(d.numero_proceso), 15));
   filas.push(info('UNIDAD SOLICITANTE', e(d.unidad_solicitante), 15));
   filas.push(info('MONTO BS.', bs(d.total_final), 15, 'font-weight:bold;font-size:9.4pt'));
@@ -2907,6 +3118,8 @@ const LOGOS = {
  * © 2026 Soluciones AFFINITY. Todos los derechos reservados.
  */
 
+const CARPETA_PRUEBAS = 'ENTORNO DE PRUEBAS (datos ficticios)';
+
 const CARPETAS_TIPO = {
   OP: { nombre: 'Órdenes de Pago', porMes: true },
   OC: { nombre: 'Órdenes de Compra', porMes: true },
@@ -2945,7 +3158,9 @@ function carpetaDocumentos(tipo, fechaISO) {
   const fecha = esFechaISO(fechaISO) ? fechaISO : hoyISO();
   const anio = fecha.substring(0, 4);
   const mes = Number(fecha.substring(5, 7));
-  let carpeta = subcarpeta(subcarpeta(carpetaRaiz(), def.nombre), anio);
+  // Los documentos del entorno de pruebas quedan aparte para no mezclarse con el archivo oficial.
+  const base = tipo !== 'RESPALDOS' && db.entorno() === ENTORNO_PRUEBAS ? subcarpeta(carpetaRaiz(), CARPETA_PRUEBAS) : carpetaRaiz();
+  let carpeta = subcarpeta(subcarpeta(base, def.nombre), anio);
   if (def.porMes) carpeta = subcarpeta(carpeta, `${String(mes).padStart(2, '0')} - ${MESES[mes - 1]}`);
   return carpeta;
 }
@@ -3021,7 +3236,7 @@ function panelResumen(datos) {
     tasas,
     tasa_hoy: tasaHoy,
     variacion_semana: tasaHoy && tasaSemana ? redondear2((tasaHoy.tasa / tasaSemana.tasa - 1) * 100) : null,
-    beneficiarios_con_problemas: db.leer('Beneficiarios').filter((b) => b.activo !== false && b.estado_cuenta !== 'VÁLIDO').length,
+    beneficiarios_con_problemas: db.leer('Beneficiarios').filter((b) => b.activo !== false && problemasBeneficiario(b).length).length,
     ultimos: activos.slice().sort((a, b) => (b.numero || 0) - (a.numero || 0)).slice(0, 8).map(resumenPago)
   };
 }
@@ -3179,6 +3394,7 @@ function adminEstado() {
   const leer = (k) => { const v = props.getProperty(k); try { return v ? JSON.parse(v) : null; } catch (e) { return v; } };
   return {
     version: APP.version,
+    entorno: db.entorno(),
     base_datos_url: `https://docs.google.com/spreadsheets/d/${db.idLibro()}/edit`,
     carpeta_url: `https://drive.google.com/drive/folders/${carpetaRaiz().getId()}`,
     client_id_configurado: !!(props.getProperty('GOOGLE_CLIENT_ID') || GOOGLE_CLIENT_ID_PREDETERMINADO),
@@ -3237,7 +3453,7 @@ function leerPagosAnteriores(hoja) {
     fecha: aFechaISO(v(fila, col.fecha)),
     beneficiario: normalizarNombre(v(fila, col.beneficiario)),
     tipo_doc: normalizarTipoDoc(v(fila, col.tipo)),
-    documento: limpiarDocumento(v(fila, col.documento)),
+    documento: normalizarDocumento(v(fila, col.tipo), v(fila, col.documento)),
     monto: redondear2(aNumero(v(fila, col.monto))),
     categoria: textoSeguro(v(fila, col.categoria), 120),
     descripcion: mayusculas(v(fila, col.descripcion)),
@@ -3260,7 +3476,7 @@ function leerBeneficiariosAnteriores(hoja) {
   };
   if (col.documento < 0 || col.nombre < 0) return [];
   return valores.slice(1).map((f) => ({
-    tipo_doc: normalizarTipoDoc(f[col.tipo]), documento: limpiarDocumento(f[col.documento]),
+    tipo_doc: normalizarTipoDoc(f[col.tipo]), documento: normalizarDocumento(f[col.tipo], f[col.documento]),
     nombre: normalizarNombre(f[col.nombre]), cuenta: col.cuenta > -1 ? soloDigitos(f[col.cuenta]) : ''
   })).filter((b) => b.tipo_doc && b.documento && b.nombre);
 }
@@ -3275,8 +3491,9 @@ function leerTasasAnteriores(hoja) {
 function consolidarBeneficiarios(lista) {
   const grupos = {};
   lista.forEach((b) => {
-    const k = b.tipo_doc + b.documento;
+    const k = claveDocumento(b.tipo_doc, b.documento);
     const g = grupos[k] = grupos[k] || { tipo_doc: b.tipo_doc, documento: b.documento, nombres: {}, cuentas: {} };
+    if (estadoDocumento(b.tipo_doc, b.documento) === 'VÁLIDO') g.documento = b.documento;
     if (b.nombre) g.nombres[b.nombre] = (g.nombres[b.nombre] || 0) + 1;
     if (b.cuenta) g.cuentas[b.cuenta] = (g.cuentas[b.cuenta] || 0) + 1;
   });
@@ -3332,11 +3549,11 @@ function adminMigrar(datos, usuario) {
     });
 
     const benefExistentes = {};
-    db.leer('Beneficiarios').forEach((b) => { benefExistentes[b.tipo_doc + limpiarDocumento(b.documento)] = true; });
+    db.leer('Beneficiarios').forEach((b) => { benefExistentes[claveDocumento(b.tipo_doc, b.documento)] = true; });
     const desdePagos = pagosOrigen.filter((p) => p.tipo_doc && p.documento && p.beneficiario)
       .map((p) => ({ tipo_doc: p.tipo_doc, documento: p.documento, nombre: p.beneficiario, cuenta: p.cuenta }));
     const beneficiariosNuevos = consolidarBeneficiarios(benefOrigen.concat(desdePagos))
-      .filter((b) => !benefExistentes[b.tipo_doc + b.documento]);
+      .filter((b) => !benefExistentes[claveDocumento(b.tipo_doc, b.documento)]);
 
     const resumen = {
       hojas_leidas: hojasLeidas,
@@ -3352,12 +3569,12 @@ function adminMigrar(datos, usuario) {
     invalidarCacheTasas();
     const insertadosBen = db.insertarLote('Beneficiarios', beneficiariosNuevos, usuario.email);
     const idPorDoc = {};
-    db.leer('Beneficiarios').forEach((b) => { idPorDoc[b.tipo_doc + limpiarDocumento(b.documento)] = b.id; });
+    db.leer('Beneficiarios').forEach((b) => { idPorDoc[claveDocumento(b.tipo_doc, b.documento)] = b.id; });
     const categorias = (config.obtener('categorias') || []).map((c) => c.nombre);
     const pagos = pagosNuevos.map((p) => {
       const t = p.tasa > 0 ? { tasa: p.tasa } : tasaParaFecha(p.fecha);
       const reg = {
-        numero: p.numero, fecha: p.fecha, beneficiario_id: idPorDoc[p.tipo_doc + p.documento] || '',
+        numero: p.numero, fecha: p.fecha, beneficiario_id: idPorDoc[claveDocumento(p.tipo_doc, p.documento)] || '',
         beneficiario: p.beneficiario, tipo_doc: p.tipo_doc, documento: p.documento, monto: p.monto,
         categoria: categorias.indexOf(p.categoria) > -1 ? p.categoria : '', descripcion: p.descripcion,
         cuenta: p.cuenta.length === 20 ? formatearCuenta(p.cuenta) : p.cuenta,
@@ -3486,4 +3703,258 @@ function agregarAdministrador(email, nombre) {
     db.insertar('Usuarios', { email: correo, nombre: nombre || correo, rol: 'ADMIN', direccion: '', activo: true }, 'editor');
   }
   return `Administrador: ${correo}`;
+}
+
+
+/* ===================== 23_Entorno.gs ===================== */
+/**
+ * Módulo: Entorno de pruebas. Una base de datos aparte con datos ficticios para practicar
+ * todas las funciones sin tocar la información real. Usuarios y tasas BCV se comparten con producción.
+ * Sistema: ERP Alcaldía de Guanipa · Módulo de Órdenes
+ * Versión: 1.0.6-beta
+ * © 2026 Soluciones AFFINITY. Todos los derechos reservados.
+ */
+
+const NOMBRE_LIBRO_PRUEBAS = 'ERP Guanipa - ENTORNO DE PRUEBAS (datos ficticios)';
+const PRIMER_NUMERO_PRUEBAS = 2001;
+
+/* ---------- Datos ficticios ---------- */
+
+function cuentaFicticia(banco, oficina, control, numero) {
+  return banco + oficina + control + numero;
+}
+
+/**
+ * Beneficiarios ficticios. Varios tienen errores de tipeo a propósito (como los que llegan de
+ * listados viejos) para practicar su corrección: los pagos del banco sí traen el dato correcto.
+ */
+function beneficiariosFicticios() {
+  return [
+    { k: 'pinos', tipo_doc: 'J', documento: '401234567', nombre: 'INVERSIONES LOS PINOS DEL SUR, C.A.', cuenta: cuentaFicticia('0102', '0123', '45', '0000123456') },
+    { k: 'figuera', tipo_doc: 'V', documento: '14567890', nombre: 'MARÍA JOSÉ FIGUERA LEÓN', cuenta: '0134031230123456789', cuenta_real: cuentaFicticia('0134', '0312', '30', '1234567890') },
+    { k: 'mendez', tipo_doc: 'V', documento: '123456789', documento_real: '12345678', nombre: 'CARLOS EDUARDO MÉNDEZ RIVAS', cuenta: cuentaFicticia('0105', '0045', '11', '0045123987') },
+    { k: 'rondon', tipo_doc: 'V', documento: '9876543', nombre: 'LUIS ALBERTO RONDÓN', cuenta: cuentaFicticia('0191', '0077', '21', '2100456321') },
+    { k: 'redes', tipo_doc: 'J', documento: '412345678', nombre: 'TECNOLOGÍA Y REDES GUANIPA, C.A.', cuenta: cuentaFicticia('0172', '0194', '81', '9400112233') },
+    { k: 'tigre', tipo_doc: 'J', documento: '298765431', nombre: 'TRANSPORTE Y SERVICIOS EL TIGRE, C.A.', cuenta: cuentaFicticia('0108', '0360', '11', '0100654987') },
+    { k: 'fundacion', tipo_doc: 'J', documento: '312345670', nombre: 'FUNDACIÓN DEPORTIVA GUANIPA', cuenta: cuentaFicticia('0999', '0102', '33', '0000987654'), cuenta_real: cuentaFicticia('0102', '0412', '33', '0000987654') },
+    { k: 'oriente', tipo_doc: 'J', documento: '50123456', documento_real: '501234561', nombre: 'SUMINISTROS ORIENTE 2020, C.A.', cuenta: cuentaFicticia('0163', '0220', '14', '2200778899') },
+    { k: 'salazar', tipo_doc: 'E', documento: '81234567', nombre: 'ANA KARINA SALAZAR', cuenta: cuentaFicticia('0175', '0301', '50', '0071234560') },
+    { k: 'palma', tipo_doc: 'V', documento: '12345', nombre: 'JOSÉ GREGORIO PALMA', cuenta: cuentaFicticia('0102', '0456', '78', '0011223344') },
+    { k: 'aguaclara', tipo_doc: 'J', documento: '297654321', nombre: 'COOPERATIVA AGUA CLARA, R.L.', cuenta: '011401230456789012345' },
+    { k: 'cedeno', tipo_doc: 'V', documento: '18765432', nombre: 'ROSA ELENA CEDEÑO', cuenta: cuentaFicticia('0102', '0789', '01', '0055667788') }
+  ];
+}
+
+/** Diez pagos repartidos en los dos meses anteriores al actual, de categorías distintas, sin OP generada. */
+function pagosFicticios(hoy) {
+  const mes = (desplazamiento, dia) => {
+    const f = new Date(Date.UTC(Number(hoy.substring(0, 4)), Number(hoy.substring(5, 7)) - 1 + desplazamiento, dia, 12));
+    const semana = f.getUTCDay();
+    if (semana === 6) f.setUTCDate(f.getUTCDate() + 2);
+    if (semana === 0) f.setUTCDate(f.getUTCDate() + 1);
+    return f.toISOString().substring(0, 10);
+  };
+  return [
+    { k: 'pinos', fecha: mes(-2, 2), monto: 245780, categoria: 'Suministros', descripcion: 'ADQUISICIÓN DE MATERIALES DE OFICINA PARA LA DIRECCIÓN DE ADMINISTRACIÓN' },
+    { k: 'figuera', fecha: mes(-2, 7), monto: 32000, categoria: 'Ayudas Económicas', descripcion: 'AYUDA ECONÓMICA PARA TRATAMIENTO MÉDICO' },
+    { k: 'nomina', fecha: mes(-2, 14), monto: 4123805.55, categoria: CATEGORIA_NOMINA, descripcion: 'PAGO DE NÓMINA PRIMERA QUINCENA' },
+    { k: 'mendez', fecha: mes(-2, 17), monto: 98000, categoria: 'Servicios Profesionales', descripcion: 'ASESORÍA TÉCNICA EN LEVANTAMIENTO TOPOGRÁFICO DEL SECTOR LAS MERCEDES' },
+    { k: 'rondon', fecha: mes(-2, 24), monto: 11500, categoria: 'Viáticos, Transporte y Representación', descripcion: 'VIÁTICOS POR TRASLADO A BARCELONA PARA GESTIONES ANTE LA GOBERNACIÓN' },
+    { k: 'redes', fecha: mes(-1, 2), monto: 1269000, categoria: 'Tecnología', descripcion: 'ADQUISICIÓN DE DOS (2) EQUIPOS DE COMPUTACIÓN PARA HACIENDA MUNICIPAL' },
+    { k: 'tigre', fecha: mes(-1, 8), monto: 2543000, categoria: 'Servicios Públicos, Infraestructura y Obras', descripcion: 'SERVICIO DE BACHEO EN LA CALLE BOLÍVAR' },
+    { k: 'fundacion', fecha: mes(-1, 15), monto: 120000, categoria: 'Subvenciones', descripcion: 'SUBVENCIÓN PARA LOS JUEGOS DEPORTIVOS MUNICIPALES' },
+    { k: 'oriente', fecha: mes(-1, 21), monto: 76400, categoria: 'Comunicación, Publicidad y Logística', descripcion: 'IMPRESIÓN DE MATERIAL INFORMATIVO DE LA JORNADA DE CEDULACIÓN' },
+    { k: 'salazar', fecha: mes(-1, 27), monto: 155000, categoria: 'Honorarios Profesionales', descripcion: 'HONORARIOS POR ELABORACIÓN DEL PROYECTO DE ALUMBRADO PÚBLICO' }
+  ];
+}
+
+/** Texto de conciliación de ejemplo (mes actual) para practicar la importación. */
+function conciliacionFicticia(hoy) {
+  const dia = (d) => {
+    const f = new Date(Date.UTC(Number(hoy.substring(0, 4)), Number(hoy.substring(5, 7)) - 1, d, 12));
+    return fechaVE(f.toISOString().substring(0, 10));
+  };
+  return [
+    'Fecha;Referencia;Descripción;Débito;Crédito',
+    `${dia(2)};PR-90001;PAGO A PROVEEDORES BDV J040123456 LOTE 00500101;198.250,00;`,
+    `${dia(3)};PR-90002;PAGO A PROVEEDORES OTROS BANCOS 0172 J412345678;311.400,00;`,
+    `${dia(5)};PR-90003;PAGO DE NOMINA;4.250.118,20;`,
+    `${dia(6)};PR-90004;PAGO A PROVEEDORES BDV V018765432 LOTE 00500102;24.000,00;`,
+    `${dia(6)};PR-90005;PAGO A PROVEEDORES OTROS BANCOS 0134 J305556667;67.800,00;`,
+    `${dia(6)};;TRANSFERENCIA RECIBIDA;;150.000,00`
+  ].join('\n');
+}
+
+function sembrarDatosFicticios(quien) {
+  const hoy = hoyISO();
+  const categorias = (config.obtener('categorias') || []).map((c) => c.nombre);
+  const categoriaValida = (c) => (categorias.indexOf(c) > -1 ? c : '');
+  const fichas = beneficiariosFicticios();
+  const registros = db.insertarLote('Beneficiarios', fichas.map((b) => {
+    const cuenta = soloDigitos(b.cuenta);
+    return {
+      tipo_doc: b.tipo_doc, documento: b.documento, nombre: b.nombre,
+      cuenta: cuenta.length === 20 ? formatearCuenta(cuenta) : cuenta,
+      banco_codigo: codigoBanco(cuenta), banco: nombreBanco(cuenta), estado_cuenta: estadoCuenta(cuenta),
+      alias: '', activo: true, notas: 'DATO FICTICIO DEL ENTORNO DE PRUEBAS'
+    };
+  }), quien);
+  const porClave = {};
+  fichas.forEach((b, i) => { porClave[b.k] = { ficha: b, registro: registros[i] }; });
+  const nombreNomina = config.obtener('beneficiario_nomina') || 'PAGO DE NÓMINA';
+
+  const pagos = pagosFicticios(hoy).map((p, i) => {
+    const ben = porClave[p.k];
+    const cuenta = ben ? soloDigitos(ben.ficha.cuenta_real || ben.ficha.cuenta) : '';
+    const base = {
+      numero: PRIMER_NUMERO_PRUEBAS + i, fecha: p.fecha, monto: p.monto,
+      beneficiario_id: ben ? ben.registro.id : '',
+      beneficiario: ben ? ben.ficha.nombre : nombreNomina,
+      tipo_doc: ben ? ben.ficha.tipo_doc : '',
+      documento: ben ? (ben.ficha.documento_real || ben.ficha.documento) : '',
+      categoria: categoriaValida(p.categoria), descripcion: p.descripcion, cuenta,
+      estado: ESTADO_ACTIVA, origen: 'CONCILIACION', referencia_banco: `PRUEBA-${String(i + 1).padStart(3, '0')}`,
+      op_generada: false, op_version: 0
+    };
+    return Object.assign(base, camposCalculadosPago(base));
+  });
+  db.insertarLote('Pagos', pagos, quien);
+  return { beneficiarios: registros.length, pagos: pagos.length, con_errores: registros.filter((b) => problemasBeneficiario(b).length).length };
+}
+
+/* ---------- Gestión del entorno ---------- */
+
+function propiedadesEntorno() {
+  const props = PropertiesService.getScriptProperties();
+  let info = null;
+  try { info = JSON.parse(props.getProperty('PRUEBAS_INFO') || 'null'); } catch (e) { info = null; }
+  return { props, idPruebas: props.getProperty('DB_ID_PRUEBAS') || '', info };
+}
+
+function conteosEntorno(nombre) {
+  const anterior = db.entorno();
+  db.usarEntorno(nombre);
+  try {
+    return {
+      pagos: db.leer('Pagos').length,
+      beneficiarios: db.leer('Beneficiarios').length,
+      ordenes_pago: db.leer('Pagos').filter((p) => p.op_generada === true).length,
+      ordenes_compra_servicio: db.leer('OrdenesCompra').length
+    };
+  } finally {
+    db.usarEntorno(anterior);
+  }
+}
+
+function estadoEntorno() {
+  const { idPruebas, info } = propiedadesEntorno();
+  const activo = db.entorno();
+  return {
+    activo,
+    existe_pruebas: !!idPruebas,
+    pruebas: idPruebas ? Object.assign({ url: `https://docs.google.com/spreadsheets/d/${idPruebas}/edit` }, info || {}, { conteos: conteosEntorno(ENTORNO_PRUEBAS) }) : null,
+    produccion: { conteos: conteosEntorno(ENTORNO_PRODUCCION) }
+  };
+}
+
+function auditarEnProduccion(usuario, accion, detalle) {
+  const anterior = db.entorno();
+  db.usarEntorno(ENTORNO_PRODUCCION);
+  try { auditar(usuario, 'ENTORNO', accion, '', detalle); } finally { db.usarEntorno(anterior); }
+}
+
+function enviarAPapelera(id) {
+  if (!id) return;
+  try { DriveApp.getFileById(id).setTrashed(true); } catch (e) { console.warn('No se pudo enviar a la papelera el libro de pruebas: ' + e.message); }
+}
+
+/** Crea (o reinicia) el entorno de pruebas con datos ficticios y lo deja activo. */
+function crearEntornoPruebas(usuario) {
+  return db.conBloqueo(() => {
+    const { props, idPruebas } = propiedadesEntorno();
+    db.usarEntorno(ENTORNO_PRODUCCION);
+    const configProduccion = db.leer('Config').map((r) => ({ clave: r.clave, valor: r.valor, descripcion: r.descripcion }));
+
+    const libro = SpreadsheetApp.create(NOMBRE_LIBRO_PRUEBAS);
+    DriveApp.getFileById(libro.getId()).moveTo(subcarpeta(carpetaRaiz(), CARPETA_PRUEBAS));
+    db.usarLibro(libro, ENTORNO_PRUEBAS);
+    props.setProperty('DB_ID_PRUEBAS', libro.getId());
+    db.usarEntorno(ENTORNO_PRUEBAS);
+    db.prepararTablas();
+    ['Hoja 1', 'Sheet1'].forEach((n) => { const h = libro.getSheetByName(n); if (h && libro.getSheets().length > 1) libro.deleteSheet(h); });
+
+    const configPruebas = configProduccion.map((r) => {
+      if (r.clave !== 'correlativos') return r;
+      return Object.assign({}, r, { valor: Object.assign({ oc: 1, os: 1 }, r.valor, { op: PRIMER_NUMERO_PRUEBAS + pagosFicticios(hoyISO()).length }) });
+    });
+    if (!configPruebas.some((r) => r.clave === 'correlativos')) {
+      configPruebas.push({ clave: 'correlativos', valor: { op: PRIMER_NUMERO_PRUEBAS + 10, oc: 1, os: 1 }, descripcion: CONFIG_BASE.correlativos.descripcion });
+    }
+    db.insertarLote('Config', configPruebas, usuario.email);
+    config.invalidar();
+    const sembrado = sembrarDatosFicticios(usuario.email);
+    auditar(usuario, 'ENTORNO', 'CREAR_PRUEBAS', libro.getId(), sembrado);
+
+    enviarAPapelera(idPruebas);
+    const info = { creado_en: ahoraISO(), creado_por: usuario.email };
+    props.setProperty('PRUEBAS_INFO', JSON.stringify(info));
+    props.setProperty('ENTORNO', ENTORNO_PRUEBAS);
+    auditarEnProduccion(usuario, idPruebas ? 'REINICIAR_PRUEBAS' : 'CREAR_PRUEBAS', Object.assign({ libro: libro.getId(), anterior: idPruebas || null }, sembrado));
+    return Object.assign({ entorno: ENTORNO_PRUEBAS, url: `https://docs.google.com/spreadsheets/d/${libro.getId()}/edit` }, sembrado);
+  });
+}
+
+function cambiarEntorno(destino, usuario) {
+  const { props, idPruebas } = propiedadesEntorno();
+  if (destino === ENTORNO_PRUEBAS && !idPruebas) throw new ErrorApp('Primero cree el entorno de pruebas.', 'SIN_ENTORNO');
+  props.setProperty('ENTORNO', destino === ENTORNO_PRUEBAS ? ENTORNO_PRUEBAS : ENTORNO_PRODUCCION);
+  db.usarEntorno(destino);
+  config.invalidar();
+  auditarEnProduccion(usuario, 'CAMBIAR', { destino });
+  return { entorno: db.entorno() };
+}
+
+/**
+ * Termina las pruebas: el libro de pruebas va a la papelera de Drive (recuperable 30 días)
+ * y el sistema queda trabajando con la base real. La base de producción no se toca.
+ */
+function eliminarEntornoPruebas(usuario) {
+  return db.conBloqueo(() => {
+    const { props, idPruebas } = propiedadesEntorno();
+    if (!idPruebas) throw new ErrorApp('No hay entorno de pruebas que eliminar.', 'SIN_ENTORNO');
+    const conteos = conteosEntorno(ENTORNO_PRUEBAS);
+    props.setProperty('ENTORNO', ENTORNO_PRODUCCION);
+    props.deleteProperty('DB_ID_PRUEBAS');
+    props.deleteProperty('PRUEBAS_INFO');
+    db.usarEntorno(ENTORNO_PRODUCCION);
+    config.invalidar();
+    enviarAPapelera(idPruebas);
+    auditarEnProduccion(usuario, 'ELIMINAR_PRUEBAS', { libro: idPruebas, conteos });
+    return { entorno: ENTORNO_PRODUCCION, produccion: conteosEntorno(ENTORNO_PRODUCCION) };
+  });
+}
+
+/* ---------- API ---------- */
+
+function entornoEstadoApi() {
+  return estadoEntorno();
+}
+
+function entornoCrearApi(datos, usuario) {
+  if (datos.confirmacion !== 'PRUEBAS') throw new ErrorApp('Escriba PRUEBAS para confirmar.', 'VALIDACION');
+  return crearEntornoPruebas(usuario);
+}
+
+function entornoCambiarApi(datos, usuario) {
+  return cambiarEntorno(datos.destino, usuario);
+}
+
+function entornoEliminarApi(datos, usuario) {
+  if (datos.confirmacion !== 'REALES') throw new ErrorApp('Escriba REALES para confirmar.', 'VALIDACION');
+  return eliminarEntornoPruebas(usuario);
+}
+
+function conciliacionEjemplo() {
+  if (db.entorno() !== ENTORNO_PRUEBAS) throw new ErrorApp('El ejemplo solo está disponible en el entorno de pruebas.', 'ENTORNO');
+  return { texto: conciliacionFicticia(hoyISO()) };
 }

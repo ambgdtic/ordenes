@@ -8,7 +8,8 @@
  */
 
 const ORIGEN_CODIGO = 'https://raw.githubusercontent.com/ambgdtic/ordenes/main/apps-script/';
-const ARCHIVOS_PROPIOS = ['Actualizador', 'DatosLocales'];
+// Se conservan los archivos cuyo nombre contenga estas palabras (p. ej. "99_DatosLocales").
+const ARCHIVOS_PROPIOS = /Actualizador|DatosLocales/i;
 
 function llamarApiScript(ruta, metodo, cuerpo) {
   const opciones = {
@@ -43,7 +44,7 @@ function actualizarDesdeGitHub() {
   const manifiesto = descargarDeGitHub('appsscript.json');
   JSON.parse(manifiesto);
   const actual = llamarApiScript('/content');
-  const conservar = (actual.files || []).filter((f) => ARCHIVOS_PROPIOS.indexOf(f.name) > -1);
+  const conservar = (actual.files || []).filter((f) => f.type === 'SERVER_JS' && ARCHIVOS_PROPIOS.test(f.name));
   const archivos = conservar.concat([
     { name: 'Codigo', type: 'SERVER_JS', source: codigo },
     { name: 'appsscript', type: 'JSON', source: manifiesto }

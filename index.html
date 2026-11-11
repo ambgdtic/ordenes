@@ -197,7 +197,7 @@ window.CONFIG = { API_URL: 'https://script.google.com/macros/s/AKfycbxigx2eZgRXu
 /**
  * Módulo: Núcleo de la interfaz (sesión, API, enrutador, componentes).
  * Sistema: ERP Alcaldía de Guanipa · Módulo de Órdenes
- * Versión: 1.0.9-beta
+ * Versión: 1.0.12-beta
  * © 2026 Soluciones AFFINITY. Todos los derechos reservados.
  */
 'use strict';
@@ -1014,7 +1014,7 @@ App.registrar({
 ;
 /**
  * Módulo: Pagos realizados y Órdenes de Pago.
- * Sistema: ERP Alcaldía de Guanipa · Módulo de Órdenes · v1.0.8-beta
+ * Sistema: ERP Alcaldía de Guanipa · Módulo de Órdenes · v1.0.12-beta
  * © 2026 Soluciones AFFINITY.
  */
 'use strict';
@@ -1071,7 +1071,7 @@ const Pagos = (() => {
       <div class="flex flex-wrap items-center gap-2 mb-3">
         <h1 class="titulo-pagina mr-auto">Pagos y Órdenes de Pago</h1>
         ${App.puede('pagos.importar') ? `<a class="btn" href="#/importar">${ico('file-up')} Importar conciliación</a>` : ''}
-        ${App.puede('pagos.editar') ? `<button class="btn btn-prim" id="btn-nuevo">${ico('plus')} Pago manual</button>` : ''}
+
       </div>
       <div class="tarjeta p-3 mb-3 flex flex-wrap gap-2 items-center">
         ${ui.selectorPeriodo(filtros.anio, filtros.mes)}
@@ -1098,7 +1098,6 @@ const Pagos = (() => {
     };
     ['#f-anio', '#f-mes', '#f-datos', '#f-op', '#f-estado', '#f-cat'].forEach((s) => $(s).addEventListener('change', () => aplicar()));
     $('#f-texto').addEventListener('input', demorar(() => aplicar(), 450));
-    if ($('#btn-nuevo')) $('#btn-nuevo').addEventListener('click', () => editarPago(null, cargar));
 
     async function cargar() {
       const tabla = $('#tabla');
@@ -1769,7 +1768,7 @@ App.registrar({ id: 'importar', titulo: 'Importar conciliación', icono: 'file-u
 ;
 /**
  * Módulo: Órdenes de Compra y Órdenes de Servicio.
- * Sistema: ERP Alcaldía de Guanipa · Módulo de Órdenes · v1.0.0-beta
+ * Sistema: ERP Alcaldía de Guanipa · Módulo de Órdenes · v1.0.12-beta
  * © 2026 Soluciones AFFINITY.
  */
 'use strict';
@@ -1778,6 +1777,7 @@ const Ordenes = (() => {
   const MAX_ITEMS = 15;
   const r2 = (n) => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
   const nombreTipo = (t) => (t === 'COMPRA' ? 'Orden de Compra' : 'Orden de Servicio');
+  const conNumero = (o) => `${nombreTipo(o.tipo)}${o.numero ? ' N° ' + o.numero : ' (sin número)'}`;
 
   function calcular(items, ivaPct, descuento) {
     const filas = items.map((it) => {
@@ -1801,8 +1801,7 @@ const Ordenes = (() => {
     cont.innerHTML = `
       <div class="flex flex-wrap items-center gap-2 mb-3">
         <h1 class="titulo-pagina mr-auto">Órdenes de Compra y de Servicio</h1>
-        ${editar ? `<button class="btn" data-nueva="COMPRA">${ico('shopping-cart')} Nueva orden de compra</button>
-        <button class="btn btn-prim" data-nueva="SERVICIO">${ico('wrench')} Nueva orden de servicio</button>` : ''}
+        ${editar ? `<button class="btn btn-prim" id="btn-manual">${ico('plus')} Agregar manualmente</button>` : ''}
       </div>
       <div class="tarjeta p-3 mb-3 flex flex-wrap gap-2 items-center">
         <select id="f-tipo" class="campo" style="width:auto" aria-label="Tipo">${ui.opciones([{ valor: 'COMPRA', texto: 'Compras' }, { valor: 'SERVICIO', texto: 'Servicios' }], filtros.tipo, 'Compras y servicios')}</select>
@@ -1817,7 +1816,7 @@ const Ordenes = (() => {
     };
     ['#f-tipo', '#f-anio', '#f-mes', '#f-estado'].forEach((s) => $(s).addEventListener('change', aplicar));
     $('#f-texto').addEventListener('input', demorar(aplicar, 450));
-    $$('[data-nueva]', cont).forEach((b) => b.addEventListener('click', () => formulario({ tipo: b.dataset.nueva }, cargar)));
+    if ($('#btn-manual', cont)) $('#btn-manual', cont).addEventListener('click', async () => { const tipo = await elegirTipo(true); if (tipo) formulario({ tipo }, cargar); });
 
     async function cargar() {
       const tabla = $('#tabla');
@@ -1825,18 +1824,19 @@ const Ordenes = (() => {
       try {
         const r = await api('oc.listar', filtros);
         if (!r.registros.length) { tabla.innerHTML = '<div class="suave p-6">No hay órdenes con esos filtros.</div>'; $('#pag').innerHTML = ''; return; }
-        tabla.innerHTML = `<table class="tabla"><thead><tr><th>Orden</th><th>Fecha</th><th>Proveedor</th><th class="hidden lg:table-cell">Concepto</th><th class="num">Total</th><th>Pagos</th><th class="text-right">Acciones</th></tr></thead><tbody>
+        tabla.innerHTML = `<table class="tabla"><thead><tr><th>Orden</th><th>Registrada</th><th>Fecha de la orden</th><th>Proveedor</th><th class="hidden lg:table-cell">Concepto</th><th class="num">Total</th><th>Pagos</th><th class="text-right">Acciones</th></tr></thead><tbody>
           ${r.registros.map((o) => `<tr class="${o.estado === 'ANULADA' ? 'anulada' : ''}">
-            <td class="whitespace-nowrap"><span class="pill ${o.tipo === 'COMPRA' ? 'pill-info' : 'pill-ok'}">${o.tipo === 'COMPRA' ? 'OC' : 'OS'}</span> <strong>N° ${o.numero}</strong></td>
-            <td>${fmt.fecha(o.fecha)}</td>
+            <td class="whitespace-nowrap"><span class="pill ${o.tipo === 'COMPRA' ? 'pill-info' : 'pill-ok'}">${o.tipo === 'COMPRA' ? 'OC · Compra' : 'OS · Servicio'}</span> ${o.numero ? `<strong>N° ${o.numero}</strong>` : '<span class="suave text-xs">sin número</span>'}</td>
+            <td class="whitespace-nowrap text-xs" title="${esc(o.registrada_por || '')}">${fmt.fechaHora(o.registrada_en)}</td>
+            <td class="whitespace-nowrap">${o.fecha ? fmt.fecha(o.fecha) : '<span class="suave text-xs">en blanco</span>'}</td>
             <td><div class="font-medium">${esc(o.beneficiario)}</div><div class="suave text-xs">${esc(fmt.doc(o.tipo_doc, o.documento))} · ${esc(o.unidad_solicitante || '')}</div></td>
             <td class="hidden lg:table-cell text-xs" style="max-width:280px">${esc((o.concepto || '').slice(0, 120))}</td>
             <td class="num whitespace-nowrap">${fmt.bs(o.total_final)}<div class="suave text-xs">${fmt.usd(o.monto_divisa)}</div></td>
             <td class="text-xs">${o.pagos.length ? 'OP ' + o.pagos.join(', ') : '<span class="suave">—</span>'}</td>
             <td class="acciones text-right whitespace-nowrap">
-              ${o.estado !== 'ANULADA' && editar ? `<button class="btn btn-ico" data-acc="editar" data-id="${o.id}" title="Editar" aria-label="Editar orden ${o.numero}">${ico('pencil')}</button>` : ''}
-              <button class="btn btn-ico" data-acc="ver" data-id="${o.id}" title="Ver e imprimir" aria-label="Ver orden ${o.numero}">${ico('printer')}</button>
-              ${o.estado !== 'ANULADA' && App.puede('oc.anular') ? `<button class="btn btn-ico" data-acc="anular" data-id="${o.id}" title="Anular" aria-label="Anular orden ${o.numero}">${ico('ban')}</button>` : ''}
+              ${o.estado !== 'ANULADA' && editar ? `<button class="btn btn-ico" data-acc="editar" data-id="${o.id}" title="Editar" aria-label="Editar ${esc(conNumero(o))}">${ico('pencil')}</button>` : ''}
+              <button class="btn btn-ico" data-acc="ver" data-id="${o.id}" title="Ver e imprimir" aria-label="Ver ${esc(conNumero(o))}">${ico('printer')}</button>
+              ${o.estado !== 'ANULADA' && App.puede('oc.anular') ? `<button class="btn btn-ico" data-acc="anular" data-id="${o.id}" title="Anular" aria-label="Anular ${esc(conNumero(o))}">${ico('ban')}</button>` : ''}
             </td></tr>`).join('')}</tbody></table>
           <div class="p-3 text-sm font-semibold">Total activo en el filtro: ${fmt.bs(r.monto_total)}</div>`;
         $('#pag').replaceChildren(ui.paginacion(r.total, r.pagina, r.por_pagina, (n) => { filtros.pagina = n; cargar(); }));
@@ -1852,15 +1852,17 @@ const Ordenes = (() => {
     }
   }
 
-  function elegirTipo() {
+  function elegirTipo(manual) {
     return new Promise((ok) => {
       let elegido = null;
       const m = ui.modal({
         titulo: '¿Qué orden desea crear?',
-        cuerpo: '<p class="mb-3">Se copiarán el proveedor, la fecha y el concepto del pago, y la orden quedará vinculada a él.</p><div class="flex gap-2"><button class="btn flex-1" data-t="COMPRA">Orden de compra</button><button class="btn btn-prim flex-1" data-t="SERVICIO">Orden de servicio</button></div>',
+        cuerpo: `<p class="mb-3">${manual ? 'Registro manual desde el expediente. La fecha y el número pueden quedar en blanco para escribirlos a mano después de imprimir.' : 'Se copiarán el proveedor y el concepto del pago, y la orden quedará vinculada a él.'}</p>
+          <div class="flex gap-2"><button class="btn flex-1" data-t="COMPRA">${ico('shopping-cart')} Orden de Compra (OC)</button><button class="btn btn-prim flex-1" data-t="SERVICIO">${ico('wrench')} Orden de Servicio (OS)</button></div>`,
         alCerrar: () => ok(elegido)
       });
       $$('[data-t]', m.el).forEach((b) => b.addEventListener('click', () => { elegido = b.dataset.t; m.cerrar(); }));
+      ui.iconos();
     });
   }
 
@@ -1872,7 +1874,7 @@ const Ordenes = (() => {
         return ui.documento({ titulo: v.titulo, html: v.html, pdfUrl: v.pdf_url, generarPdf: App.puede('oc.editar') && o.estado !== 'ANULADA' ? async () => { const r = await api('oc.pdf', { id: o.id }, { escritura: true }); recargar(); return r; } : null });
       }
       if (acc === 'anular') {
-        const motivo = await ui.confirmar({ titulo: `Anular ${nombreTipo(o.tipo)} N° ${o.numero}`, mensaje: 'La orden quedará anulada (no se borra).', textoBoton: 'Anular', peligro: true, pedirMotivo: true });
+        const motivo = await ui.confirmar({ titulo: `Anular ${conNumero(o)}`, mensaje: 'La orden quedará anulada (no se borra).', textoBoton: 'Anular', peligro: true, pedirMotivo: true });
         if (!motivo) return null;
         await api('oc.anular', { id: o.id, motivo }, { escritura: true });
         ui.toast('Orden anulada.', 'exito');
@@ -1885,28 +1887,35 @@ const Ordenes = (() => {
   function formulario(orden, recargar) {
     const clave = 'oc:' + (orden.id || 'nueva-' + orden.tipo + (orden.pago_id ? '-' + orden.pago_id : ''));
     const previo = borrador.leer(clave);
-    const d = Object.assign({ fecha: fmt.hoy(), tipo_pago: 'TRANSFERENCIA', condicion: 'DE CONTADO', descuento_pct: 0, items: [{}], imputacion: [], moneda: 'BOLÍVARES (Bs)', lugar_compra: App.estado.catalogos.institucion.lugar_compra }, orden, previo || {});
+    const d = Object.assign({ fecha: '', tipo_pago: 'TRANSFERENCIA', condicion: 'DE CONTADO', descuento_pct: 0, items: [{}], imputacion: [], moneda: 'BOLÍVARES (Bs)', lugar_compra: App.estado.catalogos.institucion.lugar_compra }, orden, previo || {});
     const cat = App.estado.catalogos;
     const imp = [0, 1, 2].map((i) => (d.imputacion || [])[i] || {});
-    const titulo = orden.id ? `${nombreTipo(d.tipo)} N° ${d.numero}` : `Nueva ${nombreTipo(d.tipo).toLowerCase()}`;
+    const titulo = orden.id ? conNumero(d) : `Nueva ${nombreTipo(d.tipo).toLowerCase()} (registro manual)`;
     const m = ui.modal({
       titulo, tamano: 'grande',
       cuerpo: `
         ${previo ? '<div class="alerta alerta-info mb-3">Se recuperó un borrador sin guardar.</div>' : ''}
         ${d.pago_id ? `<div class="alerta alerta-ok mb-3">Quedará vinculada al pago N° ${esc(d.pago_numero || '')}.</div>` : ''}
         <form id="form-oc" class="space-y-4" novalidate>
+          <div class="flex flex-wrap items-center gap-3 p-3 rounded-lg" style="background:var(--superficie-2)">
+            <span class="font-semibold">Tipo:</span>
+            <label class="check"><input type="radio" name="oc-tipo" value="COMPRA" ${d.tipo === 'COMPRA' ? 'checked' : ''} ${orden.id ? 'disabled' : ''}><span><strong>Orden de Compra (OC)</strong></span></label>
+            <label class="check"><input type="radio" name="oc-tipo" value="SERVICIO" ${d.tipo !== 'COMPRA' ? 'checked' : ''} ${orden.id ? 'disabled' : ''}><span><strong>Orden de Servicio (OS)</strong></span></label>
+            <span class="suave text-xs ml-auto">Fecha y número pueden quedar en blanco: se escriben a mano después de imprimir.</span>
+          </div>
           <div class="grid grid-cols-1 sm:grid-cols-4 gap-3">
-            <div><label class="etiqueta" for="oc-fecha">Fecha</label><input id="oc-fecha" type="date" class="campo" value="${esc(d.fecha)}"></div>
+            <div><label class="etiqueta" for="oc-num">N° de orden (opcional)</label><input id="oc-num" class="campo num" inputmode="numeric" value="${esc(d.numero || '')}" placeholder="En blanco"></div>
+            <div><label class="etiqueta" for="oc-fecha">Fecha (opcional)</label><input id="oc-fecha" type="date" class="campo" value="${esc(d.fecha || '')}"></div>
             <div><label class="etiqueta" for="oc-req">N° de requisición</label><input id="oc-req" class="campo" maxlength="40" value="${esc(d.requisicion || '')}"></div>
             <div class="sm:col-span-2"><label class="etiqueta" for="oc-proc">Número de proceso</label><input id="oc-proc" class="campo" maxlength="60" value="${esc(d.numero_proceso || '')}" placeholder="AMBG-UC-CD-0000-${new Date().getFullYear()}"></div>
-            <div class="sm:col-span-2"><label class="etiqueta" for="oc-ben">Proveedor o beneficiario</label><input id="oc-ben" class="campo" maxlength="200" value="${esc(d.beneficiario || '')}" placeholder="Buscar en el registro…"></div>
+            <div class="sm:col-span-2"><label class="etiqueta" for="oc-ben">Proveedor o beneficiario</label><input id="oc-ben" class="campo" maxlength="200" value="${esc(d.beneficiario || '')}" placeholder="Escriba nombre o cédula/RIF para buscar…"></div>
             <div><label class="etiqueta" for="oc-tipodoc">Tipo</label><select id="oc-tipodoc" class="campo">${ui.opciones(['J', 'G', 'V', 'E', 'P'], d.tipo_doc, '—')}</select></div>
             <div><label class="etiqueta" for="oc-doc">R.I.F. / C.I.</label><input id="oc-doc" class="campo" inputmode="numeric" value="${esc(d.documento || '')}"><p id="oc-doc-ayuda" class="ayuda"></p></div>
             <div class="sm:col-span-2"><label class="etiqueta" for="oc-unidad">Unidad solicitante</label>
               <input id="oc-unidad" class="campo" list="lista-unidades" value="${esc(d.unidad_solicitante || '')}"><datalist id="lista-unidades">${cat.unidades.map((u) => `<option value="${esc(u)}">`).join('')}</datalist></div>
             <div><label class="etiqueta" for="oc-tpago">Tipo de pago</label><input id="oc-tpago" class="campo" list="lista-tpago" value="${esc(d.tipo_pago)}"><datalist id="lista-tpago"><option value="TRANSFERENCIA"><option value="CHEQUE"><option value="EFECTIVO"></datalist></div>
             <div><label class="etiqueta" for="oc-cond">Condición</label><input id="oc-cond" class="campo" list="lista-cond" value="${esc(d.condicion)}"><datalist id="lista-cond"><option value="DE CONTADO"><option value="CRÉDITO"><option value="ANTICIPO"></datalist></div>
-            <div><label class="etiqueta" for="oc-femi">Fecha de emisión</label><input id="oc-femi" type="date" class="campo" value="${esc(d.fecha_emision || d.fecha)}"></div>
+            <div><label class="etiqueta" for="oc-femi">Fecha de emisión</label><input id="oc-femi" type="date" class="campo" value="${esc(d.fecha_emision || '')}"></div>
             <div class="sm:col-span-3"><label class="etiqueta" for="oc-conc">Concepto</label><textarea id="oc-conc" class="campo" maxlength="1500">${esc(d.concepto || '')}</textarea></div>
           </div>
           <fieldset>
@@ -1961,7 +1970,8 @@ const Ordenes = (() => {
     function leer() {
       leerItems();
       return {
-        id: orden.id, tipo: d.tipo, pago_id: d.pago_id, pago_numero: d.pago_numero, numero: d.numero,
+        id: orden.id, tipo: ($('input[name=oc-tipo]:checked', el) || {}).value || d.tipo, pago_id: d.pago_id, pago_numero: d.pago_numero,
+        numero: $('#oc-num', el).value.replace(/\D/g, ''),
         fecha: $('#oc-fecha', el).value, requisicion: $('#oc-req', el).value, numero_proceso: $('#oc-proc', el).value,
         beneficiario: $('#oc-ben', el).value, tipo_doc: $('#oc-tipodoc', el).value, documento: $('#oc-doc', el).value,
         unidad_solicitante: $('#oc-unidad', el).value, tipo_pago: $('#oc-tpago', el).value, condicion: $('#oc-cond', el).value,
@@ -2000,12 +2010,29 @@ const Ordenes = (() => {
       $('#oc-ben', el).value = b.nombre; $('#oc-tipodoc', el).value = b.tipo_doc; $('#oc-doc', el).value = b.documento; revisarDoc(); totales();
       if (b.problemas && b.problemas.length) ui.toast(`Revise los datos de ${b.nombre}: ${b.problemas.join(' · ')}`, 'aviso', 8000);
     });
+    // También se busca escribiendo la cédula/RIF: si hay un solo registrado con ese número, se completa el nombre.
+    $('#oc-doc', el).addEventListener('blur', async () => {
+      const doc = $('#oc-doc', el).value.replace(/\D/g, '');
+      if (doc.length < 5) return;
+      try {
+        const r = await api('beneficiarios.buscar', { texto: doc }, { silencioso: true });
+        const t = $('#oc-tipodoc', el).value;
+        const c = r.filter((b) => !t || b.tipo_doc === t);
+        if (c.length === 1 && c[0].nombre !== $('#oc-ben', el).value) {
+          $('#oc-ben', el).value = c[0].nombre; $('#oc-tipodoc', el).value = c[0].tipo_doc; $('#oc-doc', el).value = c[0].documento; revisarDoc(); totales();
+          ui.toast(`Proveedor encontrado: ${c[0].nombre}.`, 'info');
+        }
+      } catch (e) { /* la búsqueda es solo una ayuda */ }
+    });
+    $$('input[name=oc-tipo]', el).forEach((r) => r.addEventListener('change', () => {
+      $('h2', m.el).textContent = `Nueva ${nombreTipo(r.value).toLowerCase()} (registro manual)`;
+    }));
     $('#oc-prev', el).addEventListener('click', async (ev) => {
       const btn = ev.currentTarget;
       ui.ocupado(btn, true);
       try {
         const v = await api('oc.vistaPrevia', leer());
-        ui.documento({ titulo: 'Vista previa (sin guardar)', html: v.html, aviso: 'Vista previa: el número se asigna al guardar.' });
+        ui.documento({ titulo: 'Vista previa (sin guardar)', html: v.html, aviso: 'Vista previa: así se imprimirá; la fecha y el número en blanco se escriben a mano.' });
       } catch (e) { ui.error(e); } finally { ui.ocupado(btn, false); }
     });
     const guardar = async (ev, generar) => {
@@ -2015,10 +2042,10 @@ const Ordenes = (() => {
         const r = await api('oc.guardar', Object.assign(leer(), { generar_pdf: generar }), { escritura: true });
         borrador.borrar(clave);
         m.cerrar();
-        ui.toast(`${nombreTipo(r.orden.tipo)} N° ${r.orden.numero} guardada${generar ? ' y PDF generado en Drive' : ''}.`, 'exito');
+        ui.toast(`${conNumero(r.orden)} registrada${generar ? ' y PDF generado en Drive' : ''}.`, 'exito');
         if (recargar) recargar();
         ui.documento({
-          titulo: `${nombreTipo(r.orden.tipo)} N° ${r.orden.numero}`, html: r.html, pdfUrl: r.pdf_url || r.orden.pdf_url,
+          titulo: conNumero(r.orden), html: r.html, pdfUrl: r.pdf_url || r.orden.pdf_url,
           generarPdf: () => api('oc.pdf', { id: r.orden.id }, { escritura: true })
         });
       } catch (e) { ui.error(e); } finally { ui.ocupado(btn, false); }

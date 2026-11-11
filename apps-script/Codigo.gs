@@ -27,7 +27,7 @@ function autorizarCorreo() {
 
 const APP = {
   nombre: 'ERP Guanipa · Órdenes',
-  version: '1.0.11-beta',
+  version: '1.0.12-beta',
   zona: 'America/Caracas',
   nombreLibro: 'ERP Guanipa - Base de Datos',
   nombreCarpetaRaiz: 'ERP Guanipa - Documentos'
@@ -2761,7 +2761,7 @@ function conciliacionHistorial() {
 /**
  * Módulo: Orden de Pago (factura, retenciones, imputación, PDF).
  * Sistema: ERP Alcaldía de Guanipa · Módulo de Órdenes
- * Versión: 1.0.8-beta
+ * Versión: 1.0.12-beta
  * © 2026 Soluciones AFFINITY. Todos los derechos reservados.
  */
 
@@ -2943,7 +2943,7 @@ function normalizarImputacionOP(imp, fechaPago) {
 
 function textoOrdenVinculada(oc) {
   if (!oc) return '';
-  return `${oc.tipo === 'COMPRA' ? 'ORDEN DE COMPRA' : 'ORDEN DE SERVICIO'} N° ${oc.numero}`;
+  return `${oc.tipo === 'COMPRA' ? 'ORDEN DE COMPRA' : 'ORDEN DE SERVICIO'}${oc.numero ? ' N° ' + oc.numero : ''}`;
 }
 
 function datosPlantillaOP(pago) {
@@ -3079,7 +3079,7 @@ function opPdf(datos, usuario) {
 /**
  * Módulo: Órdenes de Compra y Órdenes de Servicio (misma plantilla, correlativos separados).
  * Sistema: ERP Alcaldía de Guanipa · Módulo de Órdenes
- * Versión: 1.0.2-beta
+ * Versión: 1.0.12-beta
  * © 2026 Soluciones AFFINITY. Todos los derechos reservados.
  */
 
@@ -3122,7 +3122,9 @@ function construirOrden(datos, usuario, actual) {
   const cfg = config.todo();
   const tipo = actual ? actual.tipo : String(datos.tipo || '').toUpperCase();
   if (!TIPOS_ORDEN[tipo]) throw new ErrorApp('Indique si es Orden de Compra u Orden de Servicio.', 'VALIDACION');
-  const fecha = aFechaISO(datos.fecha) || hoyISO();
+  // Fecha y número se escriben a mano en la orden impresa: pueden quedar en blanco.
+  const fecha = aFechaISO(datos.fecha) || '';
+  const numeroManual = Number(String(datos.numero === undefined || datos.numero === null ? '' : datos.numero).replace(/[^\d]/g, '')) || 0;
   const tipoDoc = normalizarTipoDoc(datos.tipo_doc);
   const documento = normalizarDocumento(tipoDoc, datos.documento);
   const beneficiario = normalizarNombre(datos.beneficiario).substring(0, 200);
@@ -3137,16 +3139,16 @@ function construirOrden(datos, usuario, actual) {
   if (calculo.items.some((i) => !i.descripcion)) throw new ErrorApp('Todos los ítems deben tener descripción.', 'VALIDACION');
   if (!(calculo.total_final > 0)) throw new ErrorApp('El total de la orden debe ser mayor que cero.', 'VALIDACION');
   const presupuesto = String(datos.presupuesto_tipo || '').toUpperCase();
-  const t = tasaParaFecha(fecha);
+  const t = tasaParaFecha(fecha || hoyISO());
   return {
-    tipo, fecha,
+    tipo, fecha, numero: numeroManual,
     requisicion: textoSeguro(datos.requisicion, 40),
     beneficiario, tipo_doc: tipoDoc, documento,
     numero_proceso: mayusculas(datos.numero_proceso).substring(0, 60),
     unidad_solicitante: mayusculas(datos.unidad_solicitante).substring(0, 120),
     tipo_pago: mayusculas(datos.tipo_pago || 'TRANSFERENCIA').substring(0, 40),
     condicion: mayusculas(datos.condicion || 'DE CONTADO').substring(0, 40),
-    fecha_emision: aFechaISO(datos.fecha_emision) || fecha,
+    fecha_emision: aFechaISO(datos.fecha_emision) || '',
     concepto: mayusculas(datos.concepto).substring(0, 1500),
     items: calculo.items,
     iva_pct: calculo.iva_pct, subtotal: calculo.subtotal, total_iva: calculo.total_iva,
@@ -3166,6 +3168,7 @@ function construirOrden(datos, usuario, actual) {
 function datosPlantillaOC(orden) {
   const cfg = config.todo();
   return Object.assign({}, orden, {
+    numero: orden.numero ? orden.numero : '',
     institucion: cfg.institucion,
     titulo: TIPOS_ORDEN[orden.tipo] ? TIPOS_ORDEN[orden.tipo].titulo : 'ORDEN DE SERVICIO',
     firmas: cfg.firmas_oc,
@@ -3188,21 +3191,24 @@ function ocListar(datos) {
   const pagina = Math.max(1, Number(datos.pagina) || 1);
   const porPagina = Math.min(Math.max(10, Number(datos.por_pagina) || 100), 500);
   const texto = normalizarTexto(datos.texto);
+  // El período se filtra por la fecha en que se registró la orden (la fecha de la orden puede estar en blanco).
+  const registro = (o) => String(o.creado_en || o.fecha || '').substring(0, 10);
   const lista = db.leer('OrdenesCompra').filter((o) => {
     if (datos.tipo && o.tipo !== datos.tipo) return false;
     if (datos.estado && o.estado !== datos.estado) return false;
-    if (datos.anio && String(o.fecha).substring(0, 4) !== String(datos.anio)) return false;
-    if (datos.mes && Number(String(o.fecha).substring(5, 7)) !== Number(datos.mes)) return false;
+    if (datos.anio && registro(o).substring(0, 4) !== String(datos.anio)) return false;
+    if (datos.mes && Number(registro(o).substring(5, 7)) !== Number(datos.mes)) return false;
     if (texto && normalizarTexto(`${o.beneficiario} ${o.concepto} ${o.numero_proceso} ${o.numero} ${o.documento}`).indexOf(texto) === -1) return false;
     return true;
-  }).sort((a, b) => (a.fecha === b.fecha ? (b.numero || 0) - (a.numero || 0) : (a.fecha < b.fecha ? 1 : -1)));
+  }).sort((a, b) => (String(a.creado_en) < String(b.creado_en) ? 1 : String(a.creado_en) > String(b.creado_en) ? -1 : (b._fila || 0) - (a._fila || 0)));
   const pagosPorOrden = {};
   db.leer('Pagos').forEach((p) => { if (p.orden_compra_id) (pagosPorOrden[p.orden_compra_id] = pagosPorOrden[p.orden_compra_id] || []).push(p.numero); });
   return {
     total: lista.length, pagina, por_pagina: porPagina,
     monto_total: redondear2(lista.filter((o) => o.estado !== ESTADO_ANULADA).reduce((s, o) => s + (o.total_final || 0), 0)),
     registros: lista.slice((pagina - 1) * porPagina, pagina * porPagina).map((o) => ({
-      id: o.id, tipo: o.tipo, numero: o.numero, fecha: o.fecha, beneficiario: o.beneficiario, tipo_doc: o.tipo_doc,
+      id: o.id, tipo: o.tipo, numero: o.numero || null, fecha: o.fecha || '', registrada_en: o.creado_en, registrada_por: o.creado_por,
+      beneficiario: o.beneficiario, tipo_doc: o.tipo_doc,
       documento: o.documento, concepto: o.concepto, total_final: o.total_final, monto_divisa: o.monto_divisa,
       unidad_solicitante: o.unidad_solicitante, estado: o.estado, pdf_url: o.pdf_url, pagos: pagosPorOrden[o.id] || []
     }))
@@ -3223,7 +3229,7 @@ function ocPrellenarDesdePago(datos) {
   const base = p.op_base_imponible > 0 ? p.op_base_imponible : p.monto;
   return {
     tipo: datos.tipo === 'COMPRA' ? 'COMPRA' : 'SERVICIO',
-    fecha: p.fecha, fecha_emision: p.fecha,
+    fecha: '', fecha_emision: '',
     beneficiario: p.beneficiario, tipo_doc: p.tipo_doc, documento: p.documento,
     concepto: p.descripcion, tipo_pago: 'TRANSFERENCIA', condicion: 'DE CONTADO',
     items: [{ descripcion: p.descripcion, cantidad: 1, precio_unitario: base, exento: !(p.op_base_imponible > 0) }],
@@ -3238,6 +3244,10 @@ function ocGuardar(datos, usuario) {
     if (datos.id && !actual) throw new ErrorApp('No se encontró la orden.', 'NO_ENCONTRADO');
     if (actual && actual.estado === ESTADO_ANULADA) throw new ErrorApp('La orden está anulada.', 'ESTADO');
     const orden = construirOrden(datos, usuario, actual);
+    if (orden.numero) {
+      const repetida = db.primero('OrdenesCompra', (o) => o.tipo === orden.tipo && Number(o.numero) === orden.numero && o.estado !== ESTADO_ANULADA && (!actual || o.id !== actual.id));
+      if (repetida) throw new ErrorApp(`Ya existe una ${TIPOS_ORDEN[orden.tipo].titulo.toLowerCase()} con el N° ${orden.numero} (${repetida.beneficiario}).`, 'DUPLICADO');
+    }
     const ben = sincronizarBeneficiarioDesdePago({ tipo_doc: orden.tipo_doc, documento: orden.documento, beneficiario: orden.beneficiario, cuenta: '' }, usuario.email);
     if (ben) orden.beneficiario_id = ben.id;
     let guardada;
@@ -3246,11 +3256,10 @@ function ocGuardar(datos, usuario) {
       auditar(usuario, 'ORDEN_COMPRA', 'EDITAR', actual.id, Object.assign({ numero: actual.numero, tipo: actual.tipo }, diferencias(r.antes, r.despues)));
       guardada = db.porId('OrdenesCompra', actual.id);
     } else {
-      orden.numero = config.reservarCorrelativo(TIPOS_ORDEN[orden.tipo].correlativo, 1, usuario.email);
       orden.estado = ESTADO_ACTIVA;
       orden.pdf_version = 0;
       guardada = db.insertar('OrdenesCompra', orden, usuario.email);
-      auditar(usuario, 'ORDEN_COMPRA', 'CREAR', guardada.id, { tipo: orden.tipo, numero: orden.numero, total: orden.total_final });
+      auditar(usuario, 'ORDEN_COMPRA', 'CREAR', guardada.id, { tipo: orden.tipo, numero: orden.numero || 'sin número', beneficiario: orden.beneficiario, total: orden.total_final });
     }
     vincularPagoAOrden(datos.pago_id, guardada, usuario);
     const respuesta = { orden: db.limpiar(guardada) };
@@ -3265,8 +3274,8 @@ function generarPdfOC(orden, usuario) {
   const html = plantillaOrdenCompra(datosPlantillaOC(orden));
   const version = (Number(orden.pdf_version) || 0) + 1;
   const prefijo = TIPOS_ORDEN[orden.tipo].prefijo;
-  const nombre = `${prefijo}_${orden.numero}_${orden.fecha}_${nombreArchivoSeguro(orden.beneficiario)}${version > 1 ? '_v' + version : ''}`;
-  const archivo = guardarPdf(html, nombre, carpetaDocumentos(prefijo, orden.fecha));
+  const nombre = `${prefijo}_${orden.numero || 'SN'}_${orden.fecha || String(orden.creado_en || hoyISO()).substring(0, 10)}_${nombreArchivoSeguro(orden.beneficiario)}${version > 1 ? '_v' + version : ''}`;
+  const archivo = guardarPdf(html, nombre, carpetaDocumentos(prefijo, orden.fecha || String(orden.creado_en || hoyISO()).substring(0, 10)));
   const r = db.actualizar('OrdenesCompra', orden.id, { pdf_id: archivo.id, pdf_url: archivo.url, pdf_version: version }, usuario.email);
   auditar(usuario, 'ORDEN_COMPRA', version > 1 ? 'REGENERAR_PDF' : 'GENERAR_PDF', orden.id, { numero: orden.numero, tipo: orden.tipo, version, archivo: archivo.id });
   return { orden: r.despues, pdf_url: archivo.url, html };
@@ -3290,7 +3299,7 @@ function ocVista(datos) {
   if (!o) throw new ErrorApp('No se encontró la orden.', 'NO_ENCONTRADO');
   return {
     html: plantillaOrdenCompra(datosPlantillaOC(o)),
-    titulo: `${TIPOS_ORDEN[o.tipo].titulo} N° ${o.numero}`,
+    titulo: `${TIPOS_ORDEN[o.tipo].titulo}${o.numero ? ' N° ' + o.numero : ' (sin número)'}`,
     pdf_url: o.pdf_url || ''
   };
 }
@@ -3319,7 +3328,7 @@ function ocPdf(datos, usuario) {
  * Replican la grilla de las hojas originales: OP en 10 columnas iguales, OC/OS en 13 columnas.
  * El mismo HTML sirve para imprimir desde el navegador y para generar el PDF en Drive.
  * Sistema: ERP Alcaldía de Guanipa · Módulo de Órdenes
- * Versión: 1.0.2-beta
+ * Versión: 1.0.12-beta
  * © 2026 Soluciones AFFINITY. Todos los derechos reservados.
  */
 
@@ -3656,7 +3665,7 @@ function plantillaOrdenCompra(d) {
   const columnas = '<colgroup>' + COLUMNAS_OC_PX.map((px) => `<col style="width:${(px * 100 / totalPx).toFixed(3)}%">`).join('') + '</colgroup>';
   const pie = `<div class="pie">${e(inst.pie)}<br>${e(inst.telefono)}</div>`;
   const cuerpo = `<div class="hoja">${selloAnulada(d)}<table class="oc">${columnas}<tbody>${filas.join('')}</tbody></table>${pie}</div>`;
-  return documentoHtml(`${d.titulo} N° ${d.numero}`, ESTILOS_OC, cuerpo);
+  return documentoHtml(`${d.titulo}${d.numero ? ' N° ' + d.numero : ''}`, ESTILOS_OC, cuerpo);
 }
 
 

@@ -2,7 +2,7 @@
 /**
  * Módulo: Configuración general y catálogos base
  * Sistema: ERP Alcaldía de Guanipa · Módulo de Órdenes (Pago, Compra y Servicio)
- * Versión: 1.0.2-beta
+ * Versión: 1.0.13-beta
  * © 2026 Soluciones AFFINITY. Todos los derechos reservados.
  */
 
@@ -27,7 +27,7 @@ function autorizarCorreo() {
 
 const APP = {
   nombre: 'ERP Guanipa · Órdenes',
-  version: '1.0.12-beta',
+  version: '1.0.13-beta',
   zona: 'America/Caracas',
   nombreLibro: 'ERP Guanipa - Base de Datos',
   nombreCarpetaRaiz: 'ERP Guanipa - Documentos'
@@ -90,7 +90,7 @@ const ROLES = {
   ADMIN: { nombre: 'Administrador', permisos: ['*'] },
   TESORERIA: {
     nombre: 'Tesorería',
-    permisos: ['ver', 'pagos.editar', 'pagos.importar', 'op.generar', 'op.anular',
+    permisos: ['ver', 'pagos.editar', 'pagos.importar', 'op.generar', 'op.anular', 'oc.editar', 'oc.anular',
       'beneficiarios.editar', 'tasas.editar']
   },
   COMPRAS: {
@@ -573,7 +573,7 @@ function copiar(obj) {
  * Módulo: Capa de datos (db.*). Toda la lógica pasa por aquí; nadie llama a SpreadsheetApp directo.
  * Al migrar a PostgreSQL solo se reescribe este archivo manteniendo la misma interfaz.
  * Sistema: ERP Alcaldía de Guanipa · Módulo de Órdenes
- * Versión: 1.0.8-beta
+ * Versión: 1.0.13-beta
  * © 2026 Soluciones AFFINITY. Todos los derechos reservados.
  */
 
@@ -609,7 +609,9 @@ const ESQUEMA = {
     ['observaciones', 't'], ['presupuesto_tipo', 't'], ['imputacion', 'j'], ['lugar_compra', 't'],
     ['moneda', 't'], ['tasa_bcv', 'n', '#,##0.0000'], ['monto_divisa', 'n'], ['elaborado_por', 't'],
     ['estado', 't'], ['pdf_id', 't'], ['pdf_url', 't'], ['pdf_version', 'n', '0'],
-    ['motivo_anulacion', 't'], ['anulado_por', 't'], ['anulado_en', 't']
+    ['motivo_anulacion', 't'], ['anulado_por', 't'], ['anulado_en', 't'],
+    // 1.0.13: planilla para llenar a mano y órdenes repartidas (más de 25 ítems → varias órdenes del mismo grupo).
+    ['llenar_a_mano', 'b'], ['grupo', 't'], ['parte', 'n', '0'], ['partes', 'n', '0'], ['item_desde', 'n', '0']
   ],
   Importaciones: [
     ['archivo_nombre', 't'], ['archivo_id', 't'], ['archivo_url', 't'], ['filas_total', 'n', '0'],
@@ -2370,7 +2372,7 @@ function pagosRecalcularTasa(datos, usuario) {
  * Módulo: Importación de conciliaciones bancarias (Excel, CSV o texto pegado).
  * Cada débito se convierte en un pago con número de Orden de Pago correlativo.
  * Sistema: ERP Alcaldía de Guanipa · Módulo de Órdenes
- * Versión: 1.0.2-beta
+ * Versión: 1.0.12-beta
  * © 2026 Soluciones AFFINITY. Todos los derechos reservados.
  */
 
@@ -3079,12 +3081,37 @@ function opPdf(datos, usuario) {
 /**
  * Módulo: Órdenes de Compra y Órdenes de Servicio (misma plantilla, correlativos separados).
  * Sistema: ERP Alcaldía de Guanipa · Módulo de Órdenes
- * Versión: 1.0.12-beta
+ * Versión: 1.0.13-beta
  * © 2026 Soluciones AFFINITY. Todos los derechos reservados.
  */
 
 const TIPOS_ORDEN = { COMPRA: { correlativo: 'oc', prefijo: 'OC', titulo: 'ORDEN DE COMPRA' }, SERVICIO: { correlativo: 'os', prefijo: 'OS', titulo: 'ORDEN DE SERVICIO' } };
-const MAX_ITEMS_ORDEN = 15;
+// Cada orden imprime una tabla de 15 filas; si pasa de 15 ítems, una de 25. Un registro con más de 25 ítems
+// se reparte en varias órdenes (de 25 en 25) que siguen la misma regla, hasta 50 ítems por registro.
+const FILAS_TABLA_OC = [15, 25];
+const MAX_ITEMS_ORDEN = 25;
+const MAX_ITEMS_REGISTRO = 50;
+
+/** Filas de la tabla de ítems de la plantilla: 15 si caben, si no 25. */
+function filasTablaOC(cantidadItems) {
+  return FILAS_TABLA_OC.find((n) => cantidadItems <= n) || MAX_ITEMS_ORDEN;
+}
+
+/** Ítems con contenido (descripción o precio), en el orden en que se escribieron. */
+function itemsConContenido(items) {
+  return (Array.isArray(items) ? items : []).filter((it) => String(it.descripcion || '').trim() || aNumero(it.precio_unitario) > 0);
+}
+
+/** Reparte los ítems en grupos de hasta 25: una orden por grupo. */
+function repartirItemsOC(items) {
+  const lista = itemsConContenido(items);
+  if (lista.length > MAX_ITEMS_REGISTRO) {
+    throw new ErrorApp(`Un registro admite máximo ${MAX_ITEMS_REGISTRO} ítems (se reparten en órdenes de hasta ${MAX_ITEMS_ORDEN}).`, 'VALIDACION');
+  }
+  const grupos = [];
+  for (let i = 0; i < lista.length; i += MAX_ITEMS_ORDEN) grupos.push(lista.slice(i, i + MAX_ITEMS_ORDEN));
+  return grupos.length ? grupos : [[]];
+}
 
 /** Cálculo puro de la orden. Los ítems exentos no llevan IVA y suman en "Total exento". */
 function calcularOrdenCompra(itemsEntrada, ivaPct, descuentoPct) {
@@ -3122,33 +3149,37 @@ function construirOrden(datos, usuario, actual) {
   const cfg = config.todo();
   const tipo = actual ? actual.tipo : String(datos.tipo || '').toUpperCase();
   if (!TIPOS_ORDEN[tipo]) throw new ErrorApp('Indique si es Orden de Compra u Orden de Servicio.', 'VALIDACION');
+  // "Planilla para llenar a mano": N°, fechas, requisición, proceso y unidad se escriben a lápiz sobre la hoja.
+  const aMano = datos.llenar_a_mano === true;
+  const enBlanco = (v) => (aMano ? '' : v);
   // Fecha y número se escriben a mano en la orden impresa: pueden quedar en blanco.
-  const fecha = aFechaISO(datos.fecha) || '';
-  const numeroManual = Number(String(datos.numero === undefined || datos.numero === null ? '' : datos.numero).replace(/[^\d]/g, '')) || 0;
+  const fecha = enBlanco(aFechaISO(datos.fecha) || '');
+  const numeroManual = aMano ? 0 : Number(String(datos.numero === undefined || datos.numero === null ? '' : datos.numero).replace(/[^\d]/g, '')) || 0;
   const tipoDoc = normalizarTipoDoc(datos.tipo_doc);
   const documento = normalizarDocumento(tipoDoc, datos.documento);
   const beneficiario = normalizarNombre(datos.beneficiario).substring(0, 200);
   if (!beneficiario) throw new ErrorApp('Indique el proveedor o beneficiario.', 'VALIDACION');
   if (!tipoDoc || !documento) throw new ErrorApp('Indique el RIF o cédula del proveedor.', 'VALIDACION');
   const itemsEntrada = Array.isArray(datos.items) ? datos.items : [];
-  if (itemsEntrada.filter((i) => String(i.descripcion || '').trim()).length > MAX_ITEMS_ORDEN) {
-    throw new ErrorApp(`La plantilla admite máximo ${MAX_ITEMS_ORDEN} ítems.`, 'VALIDACION');
+  if (itemsConContenido(itemsEntrada).length > MAX_ITEMS_ORDEN) {
+    throw new ErrorApp(`Una orden admite máximo ${MAX_ITEMS_ORDEN} ítems. Para más, registre otra orden.`, 'VALIDACION');
   }
   const calculo = calcularOrdenCompra(itemsEntrada, cfg.iva_pct, datos.descuento_pct);
   if (!calculo.items.length) throw new ErrorApp('Agregue al menos un ítem con descripción, cantidad y precio.', 'VALIDACION');
   if (calculo.items.some((i) => !i.descripcion)) throw new ErrorApp('Todos los ítems deben tener descripción.', 'VALIDACION');
   if (!(calculo.total_final > 0)) throw new ErrorApp('El total de la orden debe ser mayor que cero.', 'VALIDACION');
   const presupuesto = String(datos.presupuesto_tipo || '').toUpperCase();
-  const t = tasaParaFecha(fecha || hoyISO());
+  // Sin fecha no hay tasa aplicable: la planilla muestra "N/A" (antes tomaba la del día de registro).
+  const t = fecha ? tasaParaFecha(fecha) : null;
   return {
-    tipo, fecha, numero: numeroManual,
-    requisicion: textoSeguro(datos.requisicion, 40),
+    tipo, fecha, numero: numeroManual, llenar_a_mano: aMano,
+    requisicion: enBlanco(textoSeguro(datos.requisicion, 40)),
     beneficiario, tipo_doc: tipoDoc, documento,
-    numero_proceso: mayusculas(datos.numero_proceso).substring(0, 60),
-    unidad_solicitante: mayusculas(datos.unidad_solicitante).substring(0, 120),
+    numero_proceso: enBlanco(mayusculas(datos.numero_proceso).substring(0, 60)),
+    unidad_solicitante: enBlanco(mayusculas(datos.unidad_solicitante).substring(0, 120)),
     tipo_pago: mayusculas(datos.tipo_pago || 'TRANSFERENCIA').substring(0, 40),
     condicion: mayusculas(datos.condicion || 'DE CONTADO').substring(0, 40),
-    fecha_emision: aFechaISO(datos.fecha_emision) || '',
+    fecha_emision: enBlanco(aFechaISO(datos.fecha_emision) || ''),
     concepto: mayusculas(datos.concepto).substring(0, 1500),
     items: calculo.items,
     iva_pct: calculo.iva_pct, subtotal: calculo.subtotal, total_iva: calculo.total_iva,
@@ -3165,6 +3196,28 @@ function construirOrden(datos, usuario, actual) {
   };
 }
 
+/**
+ * Construye las órdenes de un registro. Si hay más de 25 ítems salen varias órdenes del mismo grupo:
+ * cada una con su parte de los ítems, su total y (si se escribió) N° consecutivo.
+ */
+function construirOrdenesDeRegistro(datos, usuario, actual) {
+  if (actual) return [construirOrden(datos, usuario, actual)];
+  const grupos = repartirItemsOC(datos.items);
+  const numeroBase = datos.llenar_a_mano === true ? 0 : Number(String(datos.numero || '').replace(/[^\d]/g, '')) || 0;
+  const ordenes = grupos.map((items, i) => construirOrden(Object.assign({}, datos, { items, numero: numeroBase ? numeroBase + i : '' }), usuario, null));
+  if (ordenes.length > 1) {
+    const grupo = Utilities.getUuid();
+    // Una sola línea de imputación con monto: cada orden imputa su propio total. Con varias líneas el reparto
+    // no se puede deducir y los montos quedan en blanco para escribirlos a mano.
+    const unaLinea = ordenes[0].imputacion.length === 1;
+    ordenes.forEach((o, i) => {
+      Object.assign(o, { grupo, parte: i + 1, partes: ordenes.length, item_desde: i * MAX_ITEMS_ORDEN + 1 });
+      o.imputacion = o.imputacion.map((l) => Object.assign({}, l, { monto: unaLinea && l.monto ? o.total_final : null }));
+    });
+  }
+  return ordenes;
+}
+
 function datosPlantillaOC(orden) {
   const cfg = config.todo();
   return Object.assign({}, orden, {
@@ -3172,6 +3225,7 @@ function datosPlantillaOC(orden) {
     institucion: cfg.institucion,
     titulo: TIPOS_ORDEN[orden.tipo] ? TIPOS_ORDEN[orden.tipo].titulo : 'ORDEN DE SERVICIO',
     firmas: cfg.firmas_oc,
+    filas_items: filasTablaOC((orden.items || []).length),
     anulada: orden.estado === ESTADO_ANULADA
   });
 }
@@ -3183,6 +3237,15 @@ function vincularPagoAOrden(pagoId, orden, usuario) {
   if (pago.orden_compra_id === orden.id) return;
   db.actualizar('Pagos', pago.id, { orden_compra_id: orden.id }, usuario.email);
   auditar(usuario, 'ORDEN_COMPRA', 'VINCULAR_PAGO', orden.id, { pago: pago.numero, orden: orden.numero });
+}
+
+/** Registra al proveedor en Beneficiarios si no existía (los expedientes manuales traen muchos nuevos). */
+function registrarBeneficiarioDeOrden(orden, usuario) {
+  const existia = buscarBeneficiario(orden.tipo_doc, orden.documento);
+  const ben = sincronizarBeneficiarioDesdePago({ tipo_doc: orden.tipo_doc, documento: orden.documento, beneficiario: orden.beneficiario, cuenta: '' }, usuario.email);
+  const nuevo = Boolean(ben && !existia);
+  if (nuevo) auditar(usuario, 'BENEFICIARIOS', 'CREAR_DESDE_ORDEN', ben.id, { nombre: ben.nombre, tipo_doc: ben.tipo_doc, documento: ben.documento });
+  return { ben, nuevo };
 }
 
 /* ---------- API ---------- */
@@ -3200,7 +3263,8 @@ function ocListar(datos) {
     if (datos.mes && Number(registro(o).substring(5, 7)) !== Number(datos.mes)) return false;
     if (texto && normalizarTexto(`${o.beneficiario} ${o.concepto} ${o.numero_proceso} ${o.numero} ${o.documento}`).indexOf(texto) === -1) return false;
     return true;
-  }).sort((a, b) => (String(a.creado_en) < String(b.creado_en) ? 1 : String(a.creado_en) > String(b.creado_en) ? -1 : (b._fila || 0) - (a._fila || 0)));
+  }).sort((a, b) => (String(a.creado_en) < String(b.creado_en) ? 1 : String(a.creado_en) > String(b.creado_en) ? -1
+    : (Number(b.parte) || 0) !== (Number(a.parte) || 0) ? (Number(a.parte) || 0) - (Number(b.parte) || 0) : (b._fila || 0) - (a._fila || 0)));
   const pagosPorOrden = {};
   db.leer('Pagos').forEach((p) => { if (p.orden_compra_id) (pagosPorOrden[p.orden_compra_id] = pagosPorOrden[p.orden_compra_id] || []).push(p.numero); });
   return {
@@ -3210,7 +3274,8 @@ function ocListar(datos) {
       id: o.id, tipo: o.tipo, numero: o.numero || null, fecha: o.fecha || '', registrada_en: o.creado_en, registrada_por: o.creado_por,
       beneficiario: o.beneficiario, tipo_doc: o.tipo_doc,
       documento: o.documento, concepto: o.concepto, total_final: o.total_final, monto_divisa: o.monto_divisa,
-      unidad_solicitante: o.unidad_solicitante, estado: o.estado, pdf_url: o.pdf_url, pagos: pagosPorOrden[o.id] || []
+      unidad_solicitante: o.unidad_solicitante, estado: o.estado, pdf_url: o.pdf_url, pagos: pagosPorOrden[o.id] || [],
+      llenar_a_mano: o.llenar_a_mano === true, parte: Number(o.parte) || 0, partes: Number(o.partes) || 0
     }))
   };
 }
@@ -3229,7 +3294,7 @@ function ocPrellenarDesdePago(datos) {
   const base = p.op_base_imponible > 0 ? p.op_base_imponible : p.monto;
   return {
     tipo: datos.tipo === 'COMPRA' ? 'COMPRA' : 'SERVICIO',
-    fecha: '', fecha_emision: '',
+    fecha: '', fecha_emision: '', llenar_a_mano: false,
     beneficiario: p.beneficiario, tipo_doc: p.tipo_doc, documento: p.documento,
     concepto: p.descripcion, tipo_pago: 'TRANSFERENCIA', condicion: 'DE CONTADO',
     items: [{ descripcion: p.descripcion, cantidad: 1, precio_unitario: base, exento: !(p.op_base_imponible > 0) }],
@@ -3243,28 +3308,39 @@ function ocGuardar(datos, usuario) {
     const actual = datos.id ? db.porId('OrdenesCompra', datos.id) : null;
     if (datos.id && !actual) throw new ErrorApp('No se encontró la orden.', 'NO_ENCONTRADO');
     if (actual && actual.estado === ESTADO_ANULADA) throw new ErrorApp('La orden está anulada.', 'ESTADO');
-    const orden = construirOrden(datos, usuario, actual);
-    if (orden.numero) {
+    const ordenes = construirOrdenesDeRegistro(datos, usuario, actual);
+    ordenes.forEach((orden) => {
+      if (!orden.numero) return;
       const repetida = db.primero('OrdenesCompra', (o) => o.tipo === orden.tipo && Number(o.numero) === orden.numero && o.estado !== ESTADO_ANULADA && (!actual || o.id !== actual.id));
       if (repetida) throw new ErrorApp(`Ya existe una ${TIPOS_ORDEN[orden.tipo].titulo.toLowerCase()} con el N° ${orden.numero} (${repetida.beneficiario}).`, 'DUPLICADO');
-    }
-    const ben = sincronizarBeneficiarioDesdePago({ tipo_doc: orden.tipo_doc, documento: orden.documento, beneficiario: orden.beneficiario, cuenta: '' }, usuario.email);
-    if (ben) orden.beneficiario_id = ben.id;
-    let guardada;
-    if (actual) {
-      const r = db.actualizar('OrdenesCompra', actual.id, orden, usuario.email);
-      auditar(usuario, 'ORDEN_COMPRA', 'EDITAR', actual.id, Object.assign({ numero: actual.numero, tipo: actual.tipo }, diferencias(r.antes, r.despues)));
-      guardada = db.porId('OrdenesCompra', actual.id);
-    } else {
+    });
+    const { ben, nuevo } = registrarBeneficiarioDeOrden(ordenes[0], usuario);
+    const guardadas = ordenes.map((orden) => {
+      if (ben) orden.beneficiario_id = ben.id;
+      if (actual) {
+        const r = db.actualizar('OrdenesCompra', actual.id, orden, usuario.email);
+        auditar(usuario, 'ORDEN_COMPRA', 'EDITAR', actual.id, Object.assign({ numero: actual.numero, tipo: actual.tipo }, diferencias(r.antes, r.despues)));
+        return db.porId('OrdenesCompra', actual.id);
+      }
       orden.estado = ESTADO_ACTIVA;
       orden.pdf_version = 0;
-      guardada = db.insertar('OrdenesCompra', orden, usuario.email);
-      auditar(usuario, 'ORDEN_COMPRA', 'CREAR', guardada.id, { tipo: orden.tipo, numero: orden.numero || 'sin número', beneficiario: orden.beneficiario, total: orden.total_final });
+      const g = db.insertar('OrdenesCompra', orden, usuario.email);
+      auditar(usuario, 'ORDEN_COMPRA', 'CREAR', g.id, {
+        tipo: orden.tipo, numero: orden.numero || 'sin número', beneficiario: orden.beneficiario, total: orden.total_final,
+        llenar_a_mano: orden.llenar_a_mano, parte: orden.partes ? `${orden.parte} de ${orden.partes}` : undefined
+      });
+      return g;
+    });
+    // Con varias órdenes, el pago queda vinculado a la primera (un pago se vincula a una sola orden).
+    vincularPagoAOrden(datos.pago_id, guardadas[0], usuario);
+    const respuesta = { orden: db.limpiar(guardadas[0]), ordenes: guardadas.map((g) => db.limpiar(g)), beneficiario_nuevo: nuevo };
+    if (datos.generar_pdf) {
+      const pdfs = guardadas.map((g) => generarPdfOC(g, usuario));
+      respuesta.pdf_url = pdfs[0].pdf_url;
+      respuesta.pdf_urls = pdfs.map((p) => p.pdf_url);
+      respuesta.orden = db.limpiar(pdfs[0].orden);
     }
-    vincularPagoAOrden(datos.pago_id, guardada, usuario);
-    const respuesta = { orden: db.limpiar(guardada) };
-    if (datos.generar_pdf) Object.assign(respuesta, generarPdfOC(guardada, usuario));
-    else respuesta.html = plantillaOrdenCompra(datosPlantillaOC(guardada));
+    respuesta.html = plantillaOrdenesCompra(guardadas.map((g) => datosPlantillaOC(g)));
     return respuesta;
   });
 }
@@ -3274,7 +3350,8 @@ function generarPdfOC(orden, usuario) {
   const html = plantillaOrdenCompra(datosPlantillaOC(orden));
   const version = (Number(orden.pdf_version) || 0) + 1;
   const prefijo = TIPOS_ORDEN[orden.tipo].prefijo;
-  const nombre = `${prefijo}_${orden.numero || 'SN'}_${orden.fecha || String(orden.creado_en || hoyISO()).substring(0, 10)}_${nombreArchivoSeguro(orden.beneficiario)}${version > 1 ? '_v' + version : ''}`;
+  const parte = orden.partes > 1 ? `_parte${orden.parte}de${orden.partes}` : '';
+  const nombre = `${prefijo}_${orden.numero || 'SN'}_${orden.fecha || String(orden.creado_en || hoyISO()).substring(0, 10)}_${nombreArchivoSeguro(orden.beneficiario)}${parte}${version > 1 ? '_v' + version : ''}`;
   const archivo = guardarPdf(html, nombre, carpetaDocumentos(prefijo, orden.fecha || String(orden.creado_en || hoyISO()).substring(0, 10)));
   const r = db.actualizar('OrdenesCompra', orden.id, { pdf_id: archivo.id, pdf_url: archivo.url, pdf_version: version }, usuario.email);
   auditar(usuario, 'ORDEN_COMPRA', version > 1 ? 'REGENERAR_PDF' : 'GENERAR_PDF', orden.id, { numero: orden.numero, tipo: orden.tipo, version, archivo: archivo.id });
@@ -3299,17 +3376,27 @@ function ocVista(datos) {
   if (!o) throw new ErrorApp('No se encontró la orden.', 'NO_ENCONTRADO');
   return {
     html: plantillaOrdenCompra(datosPlantillaOC(o)),
-    titulo: `${TIPOS_ORDEN[o.tipo].titulo}${o.numero ? ' N° ' + o.numero : ' (sin número)'}`,
+    titulo: `${TIPOS_ORDEN[o.tipo].titulo}${o.numero ? ' N° ' + o.numero : ' (sin número)'}${o.partes > 1 ? ` · parte ${o.parte} de ${o.partes}` : ''}`,
     pdf_url: o.pdf_url || ''
   };
 }
 
 function ocVistaPrevia(datos, usuario) {
   const actual = datos.id ? db.porId('OrdenesCompra', datos.id) : null;
-  const orden = construirOrden(datos, usuario, actual);
-  orden.numero = actual ? actual.numero : '';
-  orden.estado = actual ? actual.estado : ESTADO_ACTIVA;
-  return { html: plantillaOrdenCompra(datosPlantillaOC(orden)), calculo: { subtotal: orden.subtotal, total_iva: orden.total_iva, total_final: orden.total_final, monto_divisa: orden.monto_divisa, tasa_bcv: orden.tasa_bcv } };
+  const ordenes = construirOrdenesDeRegistro(datos, usuario, actual);
+  ordenes.forEach((orden) => {
+    if (actual) Object.assign(orden, { numero: actual.numero, grupo: actual.grupo, parte: actual.parte, partes: actual.partes, item_desde: actual.item_desde });
+    orden.estado = actual ? actual.estado : ESTADO_ACTIVA;
+  });
+  const suma = (k) => redondear2(ordenes.reduce((s, o) => s + (o[k] || 0), 0));
+  return {
+    html: plantillaOrdenesCompra(ordenes.map((o) => datosPlantillaOC(o))),
+    partes: ordenes.length,
+    calculo: {
+      subtotal: suma('subtotal'), total_iva: suma('total_iva'), total_final: suma('total_final'),
+      monto_divisa: ordenes.every((o) => o.monto_divisa !== null) ? suma('monto_divisa') : null, tasa_bcv: ordenes[0].tasa_bcv
+    }
+  };
 }
 
 function ocPdf(datos, usuario) {
@@ -3328,7 +3415,7 @@ function ocPdf(datos, usuario) {
  * Replican la grilla de las hojas originales: OP en 10 columnas iguales, OC/OS en 13 columnas.
  * El mismo HTML sirve para imprimir desde el navegador y para generar el PDF en Drive.
  * Sistema: ERP Alcaldía de Guanipa · Módulo de Órdenes
- * Versión: 1.0.12-beta
+ * Versión: 1.0.13-beta
  * © 2026 Soluciones AFFINITY. Todos los derechos reservados.
  */
 
@@ -3522,109 +3609,135 @@ function filasRetencionesOP(d, k) {
 
 const COLUMNAS_OC_PX = [58, 58, 66, 59, 58, 58, 58, 59, 58, 58, 58, 59, 58];
 
+// Márgenes reducidos como la OP para que quepan 25 ítems en una sola hoja carta.
 const ESTILOS_OC = `
-@page { size: letter portrait; margin: 0.72in 0.69in 0.3in 0.85in; }
+@page { size: letter portrait; margin: 0.3in 0.22in 0.22in 0.22in; }
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; background: #fff; }
 body { font-family: Arial, Helvetica, sans-serif; color: #000; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-.hoja { width: 6.96in; max-width: 100%; margin: 0; position: relative; }
-table.oc { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 5.6pt; }
-.oc td { padding: 0 1.5pt; vertical-align: middle; overflow: hidden; line-height: 1.12; }
-.nw { white-space: nowrap; overflow: visible !important; }
+.hoja { width: 100%; max-width: 8.06in; margin: 0 auto; position: relative; }
+.salto { page-break-before: always; break-before: page; }
+table.oc { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 5.8pt; }
+.oc td { padding: 0 2pt; vertical-align: middle; overflow: hidden; line-height: 1.12; }
+.nw { white-space: nowrap; }
 .b { border: 0.75pt solid #000; }
 .sec { font-weight: bold; font-size: 7.6pt; text-align: center; border: 0.75pt solid #000; }
-.lbl { font-weight: bold; font-size: 5.4pt; text-align: center; border: 0.75pt solid #000; }
-.lbl-izq { font-weight: bold; font-size: 5.4pt; text-align: left; border: 0.75pt solid #000; }
+.lbl { font-weight: bold; font-size: 5.6pt; text-align: center; border: 0.75pt solid #000; }
+.lbl-izq { font-weight: bold; font-size: 5.6pt; text-align: left; border: 0.75pt solid #000; }
 .val { font-size: 8.6pt; text-align: center; border: 0.75pt solid #000; }
-.chico { font-size: 5.6pt; text-align: center; border: 0.75pt solid #000; }
+.chico { font-size: 5.8pt; text-align: center; border: 0.75pt solid #000; }
 .gris { background: #ebeff1; }
 .der { text-align: right; }
-td.inst { font-weight: bold; font-size: 6.2pt; text-align: center; line-height: 1.3; white-space: nowrap; overflow: visible !important; }
-.titulo { font-weight: bold; font-size: 13.5pt; text-align: center; }
+.izq { text-align: left; }
+td.inst { font-weight: bold; font-size: 6.6pt; text-align: center; line-height: 1.3; white-space: nowrap; overflow: visible !important; }
+.titulo { font-weight: bold; font-size: 14pt; text-align: center; white-space: nowrap; }
 .rojo { color: #e00000; font-weight: bold; font-size: 13.5pt; }
+.parte { display: block; font-size: 6.4pt; font-weight: bold; color: #000; margin-top: 1pt; }
 .firma { font-family: Calibri, Carlito, Arial, sans-serif; font-weight: bold; font-size: 7.6pt; text-align: center; border: 0.75pt solid #000; }
-img.escudo { height: 52pt; display: block; margin: 0 auto; }
-img.logo { height: 44pt; display: block; margin: 0 auto; }
-.pie { width: 100%; margin: 28pt 0 0 0; border-top: 1.5pt solid #e00000; text-align: center; font-size: 6.4pt; padding-top: 3pt; line-height: 1.35; }
-.anulada { position: absolute; top: 3.4in; left: 0.7in; font-size: 66pt; font-weight: bold; color: rgba(200,0,0,0.22);
+img.escudo { height: 50pt; display: block; margin: 0 auto; }
+img.logo { height: 42pt; display: block; margin: 0 auto; }
+.pie { width: 100%; margin: 8pt 0 0 0; border-top: 1.5pt solid #e00000; text-align: center; font-size: 6.4pt; padding-top: 2pt; line-height: 1.3; }
+.anulada { position: absolute; top: 3.6in; left: 1.1in; font-size: 66pt; font-weight: bold; color: rgba(200,0,0,0.22);
   border: 6pt solid rgba(200,0,0,0.22); padding: 4pt 24pt; transform: rotate(-24deg); letter-spacing: 6pt; }
 `;
 
+/** Una orden (hoja carta completa). */
 function plantillaOrdenCompra(d) {
+  return documentoHtml(`${d.titulo}${d.numero ? ' N° ' + d.numero : ''}`, ESTILOS_OC, hojaOrdenCompra(d));
+}
+
+/** Varias órdenes en un solo documento (una por hoja): se usa cuando un registro se reparte en partes. */
+function plantillaOrdenesCompra(lista) {
+  if (lista.length === 1) return plantillaOrdenCompra(lista[0]);
+  const hojas = lista.map((d, i) => (i ? '<div class="salto"></div>' : '') + hojaOrdenCompra(d)).join('');
+  return documentoHtml(`${lista[0].titulo} (${lista.length} órdenes)`, ESTILOS_OC, hojas);
+}
+
+function hojaOrdenCompra(d) {
   const inst = d.institucion;
   const filas = [];
   const vacio = (n) => celda('', { cs: n });
   const bs = (v) => e(formatoBsPlantilla(v));
   const items = Array.isArray(d.items) ? d.items : [];
+  const filasItems = d.filas_items || filasTablaOC(items.length);
+  // Sin fecha de la orden no hay tasa que aplicar: se imprime N/A en tasa y monto en divisa.
+  const sinFecha = !d.fecha;
 
   filas.push(fila([
     celda(`<img class="escudo" src="${LOGOS.escudo}" alt="Escudo">`, { cs: 2 }),
     vacio(3),
     celda(`${e(inst.pais)}<br>${e(inst.estado)}<br>${e(inst.nombre)}<br>RIF: ${e(inst.rif)}`, { cs: 3, c: 'inst' }),
-    vacio(3),
-    celda(`<img class="logo" src="${LOGOS.guanipa}" alt="Guanipa">`, { cs: 2, s: 'vertical-align:middle' })
-  ], 54));
-  filas.push(fila([vacio(11), celda(e(inst.ciudad), { cs: 2, c: 'b nw', s: 'font-weight:bold;font-size:5.2pt;text-align:center' })], 7.5));
+    vacio(2),
+    celda(`<img class="logo" src="${LOGOS.guanipa}" alt="Guanipa">`, { cs: 3, s: 'vertical-align:middle' })
+  ], 52));
+  // Cabecera derecha: etiqueta en 2 columnas (cabe "Nº REQUISICIÓN" completo) y valor en 2, alineado a la izquierda.
+  filas.push(fila([vacio(11), celda(e(inst.ciudad), { cs: 2, c: 'b nw', s: 'font-weight:bold;font-size:6pt;text-align:center' })], 9));
+  const parte = d.partes > 1 ? `<span class="parte">PARTE ${d.parte} DE ${d.partes}</span>` : '';
   filas.push(fila([
-    vacio(3),
-    celda(e(d.titulo), { cs: 5, rs: 3, c: 'titulo', s: 'vertical-align:top;padding-top:1pt' }),
-    celda(`<span class="rojo">Nº ${e(d.numero)}</span>`, { cs: 2, rs: 3, c: 'nw', s: 'text-align:left;padding-left:2pt;vertical-align:top;padding-top:1pt' }),
-    celda('Nº REQUISICIÓN', { c: 'lbl-izq nw', s: 'font-size:5pt' }),
-    celda(e(d.requisicion || 'Nº'), { cs: 2, c: 'b der', s: 'font-size:6.4pt' })
-  ], 8));
-  filas.push(fila([vacio(3), celda('FECHA', { c: 'lbl-izq nw', s: 'font-size:5pt' }), celda(e(fechaVE(d.fecha, true)), { cs: 2, c: 'b der', s: 'font-size:6.4pt' })], 8));
-  filas.push(fila([vacio(3), celda('MONTO', { c: 'lbl-izq nw', s: 'font-size:5pt' }), celda(bs(d.total_final), { cs: 2, c: 'b der', s: 'font-weight:bold;font-size:9.4pt' })], 10.5));
+    vacio(2),
+    celda(e(d.titulo) + parte, { cs: 5, rs: 3, c: 'titulo', s: 'vertical-align:top;padding-top:1pt' }),
+    celda(`<span class="rojo">Nº ${e(d.numero)}</span>`, { cs: 2, rs: 3, c: 'nw', s: 'text-align:left;padding-left:4pt;vertical-align:top;padding-top:1pt' }),
+    celda('Nº REQUISICIÓN', { cs: 2, c: 'lbl-izq nw' }),
+    celda(e(d.requisicion ? d.requisicion : 'Nº'), { cs: 2, c: 'b izq', s: 'font-size:6.4pt' })
+  ], 9));
+  filas.push(fila([vacio(2), celda('FECHA', { cs: 2, c: 'lbl-izq nw' }), celda(e(fechaVE(d.fecha, true)), { cs: 2, c: 'b izq', s: 'font-size:6.4pt' })], 9));
+  filas.push(fila([vacio(2), celda('MONTO', { cs: 2, c: 'lbl-izq nw' }), celda(bs(d.total_final), { cs: 2, c: 'b der nw', s: 'font-weight:bold;font-size:9.4pt' })], 11));
 
   const seccion = (t, alto, extra) => fila([celda(t, { cs: 13, c: 'sec', s: extra || '' })], alto || 9);
-  filas.push(seccion('INFORMACIÓN GENERAL', 8.5));
+  filas.push(seccion('INFORMACIÓN GENERAL', 9));
   const info = (lbl, val, alto, estilo) => fila([celda(lbl, { cs: 4, c: 'lbl' }), celda(val, { cs: 9, c: 'val', s: estilo || '' })], alto);
   filas.push(info('NOMBRE DE LA EMPRESA, BENEFICIARIO O PROVEEDOR', e(d.beneficiario), 13));
-  filas.push(info('R.I.F. DE LA EMPRESA Y/O PROVEEDOR | C.I. DEL<br>BENEFICIARIO', e(`${d.tipo_doc || ''} ${documentoConPuntos(d.documento, d.tipo_doc)}`.trim()), 15));
-  filas.push(info('NÚMERO DE PROCESO', e(d.numero_proceso), 15));
-  filas.push(info('UNIDAD SOLICITANTE', e(d.unidad_solicitante), 15));
-  filas.push(info('MONTO BS.', bs(d.total_final), 15, 'font-weight:bold;font-size:9.4pt'));
+  filas.push(info('R.I.F. DE LA EMPRESA Y/O PROVEEDOR | C.I. DEL<br>BENEFICIARIO', e(`${d.tipo_doc || ''} ${documentoConPuntos(d.documento, d.tipo_doc)}`.trim()), 14));
+  filas.push(info('NÚMERO DE PROCESO', e(d.numero_proceso), 13));
+  filas.push(info('UNIDAD SOLICITANTE', e(d.unidad_solicitante), 13));
+  filas.push(info('MONTO BS.', bs(d.total_final), 13, 'font-weight:bold;font-size:9.4pt'));
 
   filas.push(seccion('CONDICIONES DE PAGO', 9));
   filas.push(fila([
     celda('TIPO DE PAGO', { cs: 2, c: 'lbl' }), celda(e(d.tipo_pago), { cs: 2, c: 'chico' }),
     celda('CONDICIÓN', { cs: 2, c: 'lbl' }), celda(e(d.condicion), { cs: 2, c: 'chico' }),
     celda('FECHA DE EMISIÓN', { cs: 2, c: 'lbl' }), celda(e(fechaVE(d.fecha_emision, true)), { cs: 3, c: 'chico' })
-  ], 15));
+  ], 12));
+  // El concepto casi nunca pasa de dos líneas; si es más largo, la celda crece sola.
   filas.push(seccion('CONCEPTO', 9));
-  filas.push(fila([celda(e(d.concepto), { cs: 13, c: 'b', s: 'font-size:7.6pt;text-align:center;padding:2pt 14pt' })], 60));
+  filas.push(fila([celda(e(d.concepto), { cs: 13, c: 'b', s: 'font-size:7.4pt;text-align:center;padding:1.5pt 10pt;line-height:1.2' })], 22));
 
-  filas.push(seccion('DESGLOSE', 8));
+  filas.push(seccion('DESGLOSE', 9));
   filas.push(fila([
     celda('DESCRIPCIÓN DEL ÍTEM', { cs: 4, c: 'lbl gris', s: 'font-size:6.2pt' }), celda('CANTIDAD', { c: 'lbl gris', s: 'font-size:6.2pt' }),
     celda('PRECIO UNITARIO', { cs: 2, c: 'lbl gris', s: 'font-size:6.2pt' }), celda('SUB-TOTAL', { cs: 2, c: 'lbl gris', s: 'font-size:6.2pt' }),
     celda('I.V.A.', { cs: 2, c: 'lbl gris', s: 'font-size:6.2pt' }), celda('TOTAL', { cs: 2, c: 'lbl gris', s: 'font-size:6.2pt' })
-  ], 14));
-  for (let i = 0; i < MAX_ITEMS_ORDEN; i++) {
+  ], 12));
+  const altoItem = filasItems > 15 ? 8.5 : 10;
+  for (let i = 0; i < filasItems; i++) {
     const it = items[i];
     const sombra = i % 2 === 1 ? ' gris' : '';
     if (it) {
       filas.push(fila([
-        celda(e(it.descripcion), { cs: 4, c: 'b' + sombra, s: 'font-size:5.6pt;text-align:center' }),
+        celda(e(it.descripcion), { cs: 4, c: 'b' + sombra, s: 'font-size:5.8pt;text-align:center' }),
         celda(e(formatoNumeroVE(it.cantidad, it.cantidad % 1 ? 2 : 0)), { c: 'chico' + sombra }),
         celda(bs(it.precio_unitario), { cs: 2, c: 'chico' + sombra }),
         celda(bs(it.subtotal), { cs: 2, c: 'chico' + sombra }),
         celda(it.exento ? '' : bs(it.iva), { cs: 2, c: 'chico' + sombra }),
         celda(bs(it.total), { cs: 2, c: 'chico' + sombra })
-      ], i === 0 ? 14 : 7.5));
+      ], altoItem));
     } else {
       filas.push(fila([
         celda('', { cs: 4, c: 'b' + sombra }), celda('', { c: 'b' + sombra }), celda('', { cs: 2, c: 'b' + sombra }),
         celda('Bs0,00', { cs: 2, c: 'chico' + sombra }), celda('Bs0,00', { cs: 2, c: 'chico' + sombra }), celda('Bs0,00', { cs: 2, c: 'chico' + sombra })
-      ], 7.5));
+      ], altoItem));
     }
   }
   const totalLbl = (t, estilo) => celda(t, { cs: 2, c: 'lbl-izq', s: estilo || '' });
-  const totalVal = (v, estilo) => celda(v, { cs: 2, c: 'b der', s: 'font-weight:bold;font-size:5.6pt;' + (estilo || '') });
-  filas.push(fila([celda('OBSERVACIONES', { cs: 9, rs: 2, c: 'b', s: 'font-weight:bold;font-size:7pt;text-align:center' }), totalLbl('SUB-TOTAL'), totalVal(bs(d.subtotal))], 7.5));
-  filas.push(fila([totalLbl('TOTAL I.V.A.'), totalVal(bs(d.total_iva))], 7.5));
-  filas.push(fila([celda(e(d.observaciones), { cs: 9, rs: 4, c: 'b', s: 'font-size:6pt;text-align:center' }), totalLbl('TOTAL EXENTO'), totalVal(d.total_exento > 0 ? bs(d.total_exento) : '')], 7.5));
-  filas.push(fila([totalLbl('TOTAL GENERAL'), totalVal(bs(d.total_general))], 7.5));
-  filas.push(fila([totalLbl('DESCUENTO'), totalVal(formatoNumeroVE(d.descuento_pct || 0, (d.descuento_pct || 0) % 1 ? 2 : 0) + '%')], 7.5));
+  const totalVal = (v, estilo) => celda(v, { cs: 2, c: 'b der', s: 'font-weight:bold;font-size:5.8pt;' + (estilo || '') });
+  const desde = Number(d.item_desde) || 1;
+  const notaParte = d.partes > 1
+    ? `<b>ORDEN ${d.parte} DE ${d.partes} · ÍTEMS ${desde} AL ${desde + items.length - 1}${d.parte < d.partes ? ' · CONTINÚA EN LA ORDEN SIGUIENTE' : ''}</b>${d.observaciones ? '<br>' : ''}` : '';
+  filas.push(fila([celda('OBSERVACIONES', { cs: 9, rs: 2, c: 'b', s: 'font-weight:bold;font-size:7pt;text-align:center' }), totalLbl('SUB-TOTAL'), totalVal(bs(d.subtotal))], 8));
+  filas.push(fila([totalLbl('TOTAL I.V.A.'), totalVal(bs(d.total_iva))], 8));
+  filas.push(fila([celda(notaParte + e(d.observaciones), { cs: 9, rs: 4, c: 'b', s: 'font-size:6pt;text-align:center' }), totalLbl('TOTAL EXENTO'), totalVal(d.total_exento > 0 ? bs(d.total_exento) : '')], 8));
+  filas.push(fila([totalLbl('TOTAL GENERAL'), totalVal(bs(d.total_general))], 8));
+  filas.push(fila([totalLbl('DESCUENTO'), totalVal(formatoNumeroVE(d.descuento_pct || 0, (d.descuento_pct || 0) % 1 ? 2 : 0) + '%')], 8));
   filas.push(fila([totalLbl('TOTAL FINAL', 'font-size:7.6pt'), totalVal(bs(d.total_final), 'font-size:8.6pt')], 11));
 
   filas.push(seccion('IMPUTACIÓN PRESUPUESTARIA', 9, 'font-size:8pt'));
@@ -3632,12 +3745,12 @@ function plantillaOrdenCompra(d) {
   filas.push(fila([
     celda('PRESUPUESTO', { cs: 3, c: 'sec', s: 'font-size:7pt' }), celda(marca('ORDINARIO'), { cs: 2, c: 'sec', s: 'font-size:7pt' }),
     celda(marca('EXTRAORDINARIO'), { cs: 2, c: 'sec', s: 'font-size:7pt' }), celda(marca('OTROS'), { cs: 6, c: 'sec', s: 'font-size:7pt' })
-  ], 8));
+  ], 9));
   filas.push(fila([
-    celda('PROGRAMA', { cs: 2, c: 'chico' }), celda('SUB-PROGRAMA', { c: 'chico', s: 'font-size:4.4pt' }), celda('PROYECTO', { c: 'chico' }),
+    celda('PROGRAMA', { cs: 2, c: 'chico' }), celda('SUB-PROGRAMA', { c: 'chico', s: 'font-size:5pt' }), celda('PROYECTO', { c: 'chico' }),
     celda('OBRA O A.C.', { c: 'chico' }), celda('PARTIDA', { cs: 2, c: 'chico' }), celda('GENÉRICA', { cs: 2, c: 'chico' }),
     celda('ESPECÍFICA', { cs: 2, c: 'chico' }), celda('MONTO', { cs: 2, c: 'chico' })
-  ], 7.5));
+  ], 8));
   for (let i = 0; i < 3; i++) {
     const l = (d.imputacion || [])[i] || {};
     filas.push(fila([
@@ -3645,27 +3758,27 @@ function plantillaOrdenCompra(d) {
       celda(e(l.proyecto), { c: 'chico' }), celda(e(l.obra), { c: 'chico' }), celda(e(l.partida), { cs: 2, c: 'chico' }),
       celda(e(l.generica), { cs: 2, c: 'chico' }), celda(e(l.especifica), { cs: 2, c: 'chico' }),
       celda(l.monto ? bs(l.monto) : '', { cs: 2, c: 'chico' })
-    ], 15));
+    ], 12));
   }
   filas.push(fila([
     celda('LUGAR DE COMPRA', { cs: 4, c: 'lbl' }), celda('TIPO DE MONEDA', { cs: 3, c: 'lbl' }),
     celda('TASA DE CAMBIO', { cs: 3, c: 'lbl' }), celda('MONTO DIVISA', { cs: 3, c: 'lbl' })
-  ], 7.5));
+  ], 8));
   filas.push(fila([
     celda(e(d.lugar_compra), { cs: 4, c: 'chico' }), celda(e(d.moneda), { cs: 3, c: 'chico' }),
-    celda(d.tasa_bcv ? bs(d.tasa_bcv) : '', { cs: 3, c: 'chico' }), celda(d.monto_divisa ? e(formatoUsdPlantilla(d.monto_divisa)) : '', { cs: 3, c: 'chico' })
-  ], 7.5));
+    celda(sinFecha ? 'N/A' : d.tasa_bcv ? bs(d.tasa_bcv) : '', { cs: 3, c: 'chico' }),
+    celda(sinFecha ? 'N/A' : d.monto_divisa ? e(formatoUsdPlantilla(d.monto_divisa)) : '', { cs: 3, c: 'chico' })
+  ], 8));
   const anchos = [2, 2, 2, 2, 2, 3];
-  filas.push(fila(anchos.map((n) => celda('', { cs: n, c: 'b' })), 68));
+  filas.push(fila(anchos.map((n) => celda('', { cs: n, c: 'b' })), 62));
   const firmas = d.firmas || [];
   filas.push(fila(anchos.map((n, i) => celda(e(firmas[i] || ''), { cs: n, c: 'firma' })), 10));
-  filas.push(fila([celda(`ELABORADO POR: ${d.elaborado_por ? '<u>&nbsp;' + e(d.elaborado_por) + '&nbsp;</u>' : '______________________________________'}`, { cs: 13, c: 'b', s: 'font-size:4pt;text-align:center' })], 13));
+  filas.push(fila([celda(`ELABORADO POR: ${d.elaborado_por ? '<u>&nbsp;' + e(d.elaborado_por) + '&nbsp;</u>' : '______________________________________'}`, { cs: 13, c: 'b', s: 'font-size:5pt;text-align:center' })], 11));
 
   const totalPx = COLUMNAS_OC_PX.reduce((a, b) => a + b, 0);
   const columnas = '<colgroup>' + COLUMNAS_OC_PX.map((px) => `<col style="width:${(px * 100 / totalPx).toFixed(3)}%">`).join('') + '</colgroup>';
   const pie = `<div class="pie">${e(inst.pie)}<br>${e(inst.telefono)}</div>`;
-  const cuerpo = `<div class="hoja">${selloAnulada(d)}<table class="oc">${columnas}<tbody>${filas.join('')}</tbody></table>${pie}</div>`;
-  return documentoHtml(`${d.titulo}${d.numero ? ' N° ' + d.numero : ''}`, ESTILOS_OC, cuerpo);
+  return `<div class="hoja">${selloAnulada(d)}<table class="oc">${columnas}<tbody>${filas.join('')}</tbody></table>${pie}</div>`;
 }
 
 
